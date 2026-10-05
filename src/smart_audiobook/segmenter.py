@@ -1,6 +1,6 @@
 """Rule-based segmentation of narration and Spanish-style dialogue."""
 
-from smart_audiobook.models import TextSegment
+from smart_audiobook.models import NARRATOR, UNKNOWN_SPEAKER, TextSegment
 
 EM_DASH = "—"
 
@@ -20,7 +20,9 @@ def segment_text(text: str) -> list[TextSegment]:
             continue
 
         if not line.startswith(EM_DASH):
-            segments.append(TextSegment(type="narration", text=line))
+            segments.append(
+                TextSegment(type="narration", text=line, speaker=NARRATOR)
+            )
             continue
 
         fragments = line.split(EM_DASH)[1:]
@@ -30,7 +32,9 @@ def segment_text(text: str) -> list[TextSegment]:
                 continue
 
             segment_type = "dialogue" if index % 2 == 0 else "narration"
-            segments.append(TextSegment(type=segment_type, text=fragment))
+            speaker = UNKNOWN_SPEAKER if segment_type == "dialogue" else NARRATOR
+            segments.append(
+                TextSegment(type=segment_type, text=fragment, speaker=speaker)
+            )
 
     return segments
-
