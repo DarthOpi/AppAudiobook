@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-audiobook"
+version = "0.1.0"
+description = "Convierte archivos TXT en audiolibros mediante síntesis de voz local."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyttsx3>=2.90,<3.0",
+]
+
+[project.scripts]
+smart-audiobook = "smart_audiobook.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

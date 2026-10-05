@@ -1,0 +1,4 @@
+Bienvenido a Smart Audiobook.
+
+Esta es la primera versión del proyecto. Su objetivo es leer un archivo de texto y convertirlo en un archivo de audio mediante una voz instalada en el sistema.
+
