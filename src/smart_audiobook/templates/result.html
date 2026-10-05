@@ -27,9 +27,9 @@
             <p class="step">AUDIOLIBRO COMPLETO</p>
             <h2>Escuchar de principio a fin</h2>
           </div>
-          <a class="download-link" href="{{ url_for('download_audio', job_id=job_id, filename=result.output.full_audiobook.name) }}">Descargar WAV</a>
+          <a class="download-link" href="{{ url_for('download_audio', processing_id=processing_id, filename=result.output.full_audiobook.name) }}">Descargar WAV</a>
         </div>
-        <audio controls preload="metadata" src="{{ url_for('play_audio', job_id=job_id, filename=result.output.full_audiobook.name) }}">
+        <audio controls preload="metadata" src="{{ url_for('play_audio', processing_id=processing_id, filename=result.output.full_audiobook.name) }}">
           Tu navegador no soporta audio HTML5.
         </audio>
       </article>
@@ -48,10 +48,10 @@
                 <span>{{ "%02d" | format(chapter.number) }}</span>
                 <h3>{{ chapter.title }}</h3>
               </div>
-              <audio controls preload="none" src="{{ url_for('play_audio', job_id=job_id, filename=chapter.filename) }}">
+              <audio controls preload="none" src="{{ url_for('play_audio', processing_id=processing_id, filename=chapter.filename) }}">
                 Tu navegador no soporta audio HTML5.
               </audio>
-              <a class="download-link" href="{{ url_for('download_audio', job_id=job_id, filename=chapter.filename) }}">Descargar</a>
+              <a class="download-link" href="{{ url_for('download_audio', processing_id=processing_id, filename=chapter.filename) }}">Descargar</a>
             </li>
           {% endfor %}
         </ol>

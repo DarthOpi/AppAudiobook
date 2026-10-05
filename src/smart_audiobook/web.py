@@ -1,15 +1,11 @@
 """FastAPI presentation layer for Smart Audiobook."""
 
 import logging
-import shutil
 import tempfile
-from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
-from threading import Lock
-from typing import Protocol
-from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -19,8 +15,16 @@ from smart_audiobook.application import (
     AudiobookApplicationService,
     ProcessingResult,
 )
+from smart_audiobook.characters import normalize_character_name
 from smart_audiobook.document_loaders import DocumentLoadError
+from smart_audiobook.review_service import ReviewService
+from smart_audiobook.review_store import (
+    ReviewProject,
+    ReviewProjectStore,
+    ReviewStateError,
+)
 from smart_audiobook.tts import SpeechGenerationError
+from smart_audiobook.tts_providers import LocalTTSProvider, TTSProvider
 from smart_audiobook.web_security import (
     MAX_UPLOAD_SIZE,
     UploadValidationError,
@@ -33,59 +37,29 @@ LOGGER = logging.getLogger(__name__)
 PACKAGE_DIRECTORY = Path(__file__).resolve().parent
 TEMPLATE_DIRECTORY = PACKAGE_DIRECTORY / "templates"
 STATIC_DIRECTORY = PACKAGE_DIRECTORY / "static"
-
-
-class ProcessingService(Protocol):
-    def process(
-        self,
-        source_path: Path,
-        output_root: Path,
-        use_llm: bool = True,
-        full_audiobook_path: Path | None = None,
-    ) -> ProcessingResult:
-        """Run the shared application pipeline."""
-
-
-@dataclass(frozen=True, slots=True)
-class WebResult:
-    """Controlled, in-memory reference to one generated audiobook."""
-
-    job_id: str
-    source_name: str
-    processing: ProcessingResult
-    allowed_files: dict[str, Path]
-
-
-class ResultStore:
-    """Small thread-safe registry; intentionally non-persistent in V0.5."""
-
-    def __init__(self) -> None:
-        self._items: dict[str, WebResult] = {}
-        self._lock = Lock()
-
-    def add(self, result: WebResult) -> None:
-        with self._lock:
-            self._items[result.job_id] = result
-
-    def get(self, job_id: str) -> WebResult | None:
-        with self._lock:
-            return self._items.get(job_id)
+PAGE_SIZE = 50
 
 
 def create_app(
-    service: ProcessingService | None = None,
+    service: AudiobookApplicationService | None = None,
     output_root: Path | None = None,
     max_upload_size: int = MAX_UPLOAD_SIZE,
+    tts_provider: TTSProvider | None = None,
+    review_service: ReviewService | None = None,
 ) -> FastAPI:
     """Create an injectable web application for production and tests."""
     logging.getLogger("smart_audiobook").setLevel(logging.INFO)
-    app = FastAPI(title="Smart Audiobook", version="0.5.0")
+    app = FastAPI(title="Smart Audiobook", version="0.6.0")
     templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
-    app.state.service = service or AudiobookApplicationService()
-    app.state.output_root = (output_root or Path("output") / "web").resolve()
+    work_root = (output_root or Path("work")).resolve()
+    provider = tts_provider or LocalTTSProvider()
+    app.state.review_service = review_service or ReviewService(
+        ReviewProjectStore(work_root),
+        provider,
+        service or AudiobookApplicationService(),
+    )
     app.state.max_upload_size = max_upload_size
-    app.state.results = ResultStore()
 
     @app.get("/", response_class=HTMLResponse)
     async def home(request: Request) -> HTMLResponse:
@@ -98,8 +72,6 @@ def create_app(
     @app.post("/upload")
     async def upload_document(request: Request, document: UploadFile):
         temporary_directory: tempfile.TemporaryDirectory[str] | None = None
-        job_root: Path | None = None
-        processing_succeeded = False
         try:
             safe_name = sanitize_upload_name(document.filename or "")
             LOGGER.info("File received: %s", safe_name)
@@ -113,31 +85,17 @@ def create_app(
                 request.app.state.max_upload_size,
             )
             validate_uploaded_content(upload_path)
-
-            job_id = uuid4().hex
-            job_root = request.app.state.output_root / job_id
-            processing = await run_in_threadpool(
-                request.app.state.service.process,
+            project = await run_in_threadpool(
+                request.app.state.review_service.start_analysis,
                 upload_path,
-                job_root,
+                safe_name,
             )
-            allowed_files = {
-                path.name: path
-                for path in (
-                    *processing.output.chapter_files,
-                    processing.output.full_audiobook,
-                )
-            }
-            request.app.state.results.add(
-                WebResult(
-                    job_id=job_id,
-                    source_name=safe_name,
-                    processing=processing,
-                    allowed_files=allowed_files,
-                )
+            return RedirectResponse(
+                request.url_for(
+                    "review_page", processing_id=project.processing_id
+                ),
+                status_code=303,
             )
-            processing_succeeded = True
-            return RedirectResponse(f"/results/{job_id}", status_code=303)
         except UploadValidationError as error:
             LOGGER.warning("Upload rejected: %s", error)
             return _error_response(
@@ -148,7 +106,7 @@ def create_app(
                 max_upload_size,
             )
         except (DocumentLoadError, SpeechGenerationError) as error:
-            LOGGER.warning("Document processing failed: %s", error)
+            LOGGER.warning("Document analysis failed: %s", error)
             return _error_response(
                 templates,
                 request,
@@ -161,7 +119,7 @@ def create_app(
             return _error_response(
                 templates,
                 request,
-                "No se pudo procesar el documento. Revisa el archivo e inténtalo de nuevo.",
+                "No se pudo analizar el documento. Revisa el archivo.",
                 500,
                 max_upload_size,
             )
@@ -169,15 +127,145 @@ def create_app(
             await document.close()
             if temporary_directory is not None:
                 temporary_directory.cleanup()
-            if job_root is not None and not processing_succeeded:
-                _cleanup_failed_job(job_root, request.app.state.output_root)
 
-    @app.get("/results/{job_id}", response_class=HTMLResponse)
-    async def result_page(request: Request, job_id: str) -> HTMLResponse:
-        stored = request.app.state.results.get(job_id)
-        if stored is None:
-            raise HTTPException(status_code=404, detail="Resultado no encontrado.")
-        result = stored.processing
+    @app.get("/review/{processing_id}", response_class=HTMLResponse)
+    async def review_page(
+        request: Request,
+        processing_id: str,
+        page: int = Query(1, ge=1),
+        speaker: str = "all",
+        chapter: str | None = None,
+    ) -> HTMLResponse:
+        project = _load_or_404(request, processing_id)
+        try:
+            chapter_number = int(chapter) if chapter else None
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Capítulo no válido.") from error
+        return _review_response(
+            templates,
+            request,
+            project,
+            page=page,
+            speaker=speaker,
+            chapter=chapter_number,
+        )
+
+    @app.post("/review/{processing_id}/segments")
+    async def save_segments(request: Request, processing_id: str):
+        project = _load_or_404(request, processing_id)
+        form = await request.form()
+        updates: dict[str, str] = {}
+        valid_ids = {segment.id for segment in project.dialogues}
+        for key, value in form.multi_items():
+            if not key.startswith("speaker_"):
+                continue
+            segment_id = key.removeprefix("speaker_")
+            if segment_id not in valid_ids:
+                raise HTTPException(status_code=400, detail="Segmento no válido.")
+            selected = str(value)
+            if selected == "__new__":
+                selected = str(form.get(f"new_{segment_id}", ""))
+            updates[segment_id] = selected
+        try:
+            await run_in_threadpool(
+                request.app.state.review_service.update_speakers,
+                processing_id,
+                updates,
+            )
+        except ReviewStateError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _review_redirect(request, processing_id)
+
+    @app.post("/review/{processing_id}/characters/rename")
+    async def rename_character(request: Request, processing_id: str):
+        _load_or_404(request, processing_id)
+        form = await request.form()
+        try:
+            await run_in_threadpool(
+                request.app.state.review_service.rename_character,
+                processing_id,
+                str(form.get("current_name", "")),
+                str(form.get("new_name", "")),
+            )
+        except ReviewStateError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _review_redirect(request, processing_id)
+
+    @app.post("/review/{processing_id}/characters/merge")
+    async def merge_characters(request: Request, processing_id: str):
+        _load_or_404(request, processing_id)
+        form = await request.form()
+        try:
+            await run_in_threadpool(
+                request.app.state.review_service.merge_characters,
+                processing_id,
+                str(form.get("source_name", "")),
+                str(form.get("target_name", "")),
+            )
+        except ReviewStateError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _review_redirect(request, processing_id)
+
+    @app.post("/review/{processing_id}/voices")
+    async def select_voice(request: Request, processing_id: str):
+        _load_or_404(request, processing_id)
+        form = await request.form()
+        try:
+            await run_in_threadpool(
+                request.app.state.review_service.select_voice,
+                processing_id,
+                str(form.get("character", "")),
+                str(form.get("voice_id", "")),
+            )
+        except ReviewStateError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _review_redirect(request, processing_id)
+
+    @app.post("/review/{processing_id}/preview")
+    async def preview_voice(request: Request, processing_id: str) -> FileResponse:
+        _load_or_404(request, processing_id)
+        form = await request.form()
+        try:
+            path = await run_in_threadpool(
+                request.app.state.review_service.preview_voice,
+                processing_id,
+                str(form.get("voice_id", "")),
+            )
+        except (ReviewStateError, SpeechGenerationError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return FileResponse(
+            path,
+            media_type="audio/wav",
+            content_disposition_type="inline",
+        )
+
+    @app.post("/review/{processing_id}/generate")
+    async def generate_audiobook(request: Request, processing_id: str):
+        project = _load_or_404(request, processing_id)
+        try:
+            await run_in_threadpool(
+                request.app.state.review_service.generate,
+                processing_id,
+            )
+        except SpeechGenerationError as error:
+            return _review_response(
+                templates,
+                request,
+                project,
+                error=str(error),
+                status_code=422,
+            )
+        return RedirectResponse(
+            request.url_for("result_page", processing_id=processing_id),
+            status_code=303,
+        )
+
+    @app.get("/results/{processing_id}", response_class=HTMLResponse)
+    async def result_page(request: Request, processing_id: str) -> HTMLResponse:
+        project = _load_or_404(request, processing_id)
+        if project.output is None:
+            return _review_redirect(request, processing_id)
+        result = ProcessingResult(project.analysis, project.output)
         chapters = [
             {
                 "number": chapter.number,
@@ -185,8 +273,8 @@ def create_app(
                 "filename": audio_path.name,
             }
             for chapter, audio_path in zip(
-                result.analysis.chapters,
-                result.output.chapter_files,
+                project.analysis.chapters,
+                project.output.chapter_files,
                 strict=True,
             )
         ]
@@ -194,24 +282,28 @@ def create_app(
             request=request,
             name="result.html",
             context={
-                "job_id": job_id,
-                "source_name": stored.source_name,
+                "processing_id": processing_id,
+                "source_name": project.source_name,
                 "result": result,
                 "chapters": chapters,
             },
         )
 
-    @app.get("/media/{job_id}/{filename:path}")
-    async def play_audio(request: Request, job_id: str, filename: str) -> FileResponse:
-        return _serve_result_file(request, job_id, filename, download=False)
-
-    @app.get("/downloads/{job_id}/{filename:path}")
-    async def download_audio(
+    @app.get("/media/{processing_id}/{filename:path}")
+    async def play_audio(
         request: Request,
-        job_id: str,
+        processing_id: str,
         filename: str,
     ) -> FileResponse:
-        return _serve_result_file(request, job_id, filename, download=True)
+        return _serve_result_file(request, processing_id, filename, download=False)
+
+    @app.get("/downloads/{processing_id}/{filename:path}")
+    async def download_audio(
+        request: Request,
+        processing_id: str,
+        filename: str,
+    ) -> FileResponse:
+        return _serve_result_file(request, processing_id, filename, download=True)
 
     return app
 
@@ -234,17 +326,21 @@ async def _store_upload(upload: UploadFile, target: Path, size_limit: int) -> No
 
 def _serve_result_file(
     request: Request,
-    job_id: str,
+    processing_id: str,
     filename: str,
     download: bool,
 ) -> FileResponse:
-    stored = request.app.state.results.get(job_id)
-    if stored is None:
-        raise HTTPException(status_code=404, detail="Resultado no encontrado.")
+    project = _load_or_404(request, processing_id)
+    if project.output is None:
+        raise HTTPException(status_code=404, detail="Audio no encontrado.")
+    allowed_files = {
+        path.name: path
+        for path in (*project.output.chapter_files, project.output.full_audiobook)
+    }
     path = resolve_allowed_output(
-        stored.processing.output.directory,
+        project.output.directory,
         filename,
-        stored.allowed_files,
+        allowed_files,
     )
     if path is None:
         raise HTTPException(status_code=404, detail="Audio no encontrado.")
@@ -253,6 +349,63 @@ def _serve_result_file(
         media_type="audio/wav",
         filename=path.name,
         content_disposition_type="attachment" if download else "inline",
+    )
+
+
+def _load_or_404(request: Request, processing_id: str) -> ReviewProject:
+    try:
+        return request.app.state.review_service.load(processing_id)
+    except ReviewStateError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+def _review_response(
+    templates: Jinja2Templates,
+    request: Request,
+    project: ReviewProject,
+    page: int = 1,
+    speaker: str = "all",
+    chapter: int | None = None,
+    error: str | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    dialogues = list(project.dialogues)
+    if speaker == "unknown":
+        dialogues = [item for item in dialogues if item.speaker == "Unknown"]
+    elif speaker != "all":
+        key = normalize_character_name(speaker)
+        dialogues = [
+            item
+            for item in dialogues
+            if normalize_character_name(item.speaker) == key
+        ]
+    if chapter is not None:
+        dialogues = [item for item in dialogues if item.chapter == chapter]
+    total_pages = max(1, ceil(len(dialogues) / PAGE_SIZE))
+    page = min(page, total_pages)
+    start = (page - 1) * PAGE_SIZE
+    visible_dialogues = dialogues[start : start + PAGE_SIZE]
+    return templates.TemplateResponse(
+        request=request,
+        name="review.html",
+        context={
+            "project": project,
+            "dialogues": visible_dialogues,
+            "filtered_count": len(dialogues),
+            "page": page,
+            "total_pages": total_pages,
+            "speaker_filter": speaker,
+            "chapter_filter": chapter,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+def _review_redirect(request: Request, processing_id: str) -> RedirectResponse:
+    return RedirectResponse(
+        request.url_for("review_page", processing_id=processing_id),
+        status_code=303,
     )
 
 
@@ -272,14 +425,6 @@ def _error_response(
         },
         status_code=status_code,
     )
-
-
-def _cleanup_failed_job(job_root: Path, output_root: Path) -> None:
-    """Remove only the controlled UUID directory of a failed web job."""
-    resolved_root = output_root.resolve()
-    resolved_job = job_root.resolve()
-    if resolved_job.parent == resolved_root:
-        shutil.rmtree(resolved_job, ignore_errors=True)
 
 
 app = create_app()

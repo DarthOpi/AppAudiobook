@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+
+{% block title %}Revisar {{ project.analysis.document.title }} · Smart Audiobook{% endblock %}
+
+{% block content %}
+  <section class="result-heading review-heading">
+    <div>
+      <p class="eyebrow">REVISIÓN PREVIA</p>
+      <h1>{{ project.analysis.document.title }}</h1>
+      <p>{{ project.source_name }} · {{ project.analysis.document.format | upper }}</p>
+    </div>
+    <a class="secondary-button" href="{{ url_for('home') }}">Otro documento</a>
+  </section>
+
+  {% if error %}
+    <div class="alert" role="alert"><strong>No se pudo continuar.</strong><span>{{ error }}</span></div>
+  {% endif %}
+
+  <section class="stats-grid" aria-label="Estadísticas del análisis">
+    <article><strong>{{ project.analysis.chapters | length }}</strong><span>capítulos</span></article>
+    <article><strong>{{ project.characters | length }}</strong><span>personajes</span></article>
+    <article><strong>{{ project.segments | length }}</strong><span>segmentos</span></article>
+    <article class="{% if project.unresolved_count %}stat-warning{% endif %}"><strong>{{ project.unresolved_count }}</strong><span>sin resolver</span></article>
+  </section>
+
+  <section class="review-layout">
+    <aside class="panel review-sidebar" aria-labelledby="cast-title">
+      <p class="step">PERSONAJES Y VOCES</p>
+      <h2 id="cast-title">Reparto</h2>
+
+      {% if not project.voices %}
+        <div class="alert"><strong>No hay voces disponibles.</strong><span>Instala una voz del sistema antes de generar.</span></div>
+      {% endif %}
+
+      <div class="character-stack">
+        {% for character in project.characters %}
+          <article class="character-editor {% if character == 'Unknown' %}unresolved-card{% endif %}">
+            <div class="character-title">
+              <span class="avatar" aria-hidden="true">{{ character[0] | upper }}</span>
+              <strong>{{ character }}</strong>
+            </div>
+            <form action="{{ url_for('select_voice', processing_id=project.processing_id) }}" method="post" class="voice-form">
+              <input type="hidden" name="character" value="{{ character }}">
+              <label>Voz
+                <select name="voice_id" {% if not project.voices %}disabled{% endif %}>
+                  {% for voice in project.voices %}
+                    <option value="{{ voice.id }}" {% if project.voice_assignments.get(character) == voice.id %}selected{% endif %}>
+                      {{ voice.name }}{% if voice.language %} · {{ voice.language }}{% endif %}{% if voice.gender %} · {{ voice.gender }}{% endif %}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <div class="inline-actions">
+                <button class="small-button" type="submit">Guardar voz</button>
+                <button class="preview-button" type="button" data-preview-url="{{ url_for('preview_voice', processing_id=project.processing_id) }}">Preview</button>
+              </div>
+              <audio class="preview-player" controls hidden></audio>
+            </form>
+
+            {% if character not in ['Narrator', 'Unknown'] %}
+              <details>
+                <summary>Renombrar</summary>
+                <form action="{{ url_for('rename_character', processing_id=project.processing_id) }}" method="post" class="compact-form">
+                  <input type="hidden" name="current_name" value="{{ character }}">
+                  <input name="new_name" value="{{ character }}" aria-label="Nuevo nombre para {{ character }}" required>
+                  <button class="small-button" type="submit">Aplicar</button>
+                </form>
+              </details>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+
+      {% if project.analysis.characters | length > 2 %}
+        <details class="merge-box">
+          <summary>Fusionar personajes</summary>
+          <form action="{{ url_for('merge_characters', processing_id=project.processing_id) }}" method="post" class="compact-form vertical">
+            <select name="source_name" aria-label="Personaje de origen" required>
+              {% for character in project.analysis.characters if character != 'Narrator' %}<option>{{ character }}</option>{% endfor %}
+            </select>
+            <select name="target_name" aria-label="Personaje de destino" required>
+              {% for character in project.characters %}<option>{{ character }}</option>{% endfor %}
+            </select>
+            <button class="small-button" type="submit">Fusionar</button>
+          </form>
+        </details>
+      {% endif %}
+    </aside>
+
+    <div class="review-main">
+      <section class="panel review-toolbar">
+        <div>
+          <p class="step">DIÁLOGOS</p>
+          <h2>{{ filtered_count }} resultados</h2>
+        </div>
+        <form method="get" action="{{ url_for('review_page', processing_id=project.processing_id) }}" class="filter-form">
+          <label>Speaker
+            <select name="speaker">
+              <option value="all" {% if speaker_filter == 'all' %}selected{% endif %}>Todos</option>
+              <option value="unknown" {% if speaker_filter == 'unknown' %}selected{% endif %}>Unknown only</option>
+              {% for character in project.analysis.characters %}
+                <option value="{{ character }}" {% if speaker_filter == character %}selected{% endif %}>{{ character }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Capítulo
+            <select name="chapter">
+              <option value="">Todos</option>
+              {% for item in project.analysis.chapters %}
+                <option value="{{ item.number }}" {% if chapter_filter == item.number %}selected{% endif %}>{{ item.number }} · {{ item.title }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button class="small-button" type="submit">Filtrar</button>
+        </form>
+      </section>
+
+      <form action="{{ url_for('save_segments', processing_id=project.processing_id) }}" method="post">
+        <div class="dialogue-list">
+          {% for segment in dialogues %}
+            <article class="dialogue-card {% if segment.speaker == 'Unknown' %}unresolved-card{% endif %}">
+              <div class="dialogue-meta">
+                <span>{{ segment.id }}</span><span>Capítulo {{ segment.chapter }}</span>
+                {% if segment.confidence is not none %}<span>{{ (segment.confidence * 100) | round | int }}% confianza</span>{% endif %}
+                <span>{{ segment.resolution_method or 'unknown' | upper }}</span>
+              </div>
+              <blockquote>“{{ segment.text }}”</blockquote>
+              <div class="speaker-control">
+                <label>Speaker
+                  <select name="speaker_{{ segment.id }}" class="speaker-select" data-new-target="new_{{ segment.id }}">
+                    {% for character in project.characters %}
+                      <option value="{{ character }}" {% if segment.speaker == character %}selected{% endif %}>{{ character }}</option>
+                    {% endfor %}
+                    <option value="__new__">New character…</option>
+                  </select>
+                </label>
+                <label class="new-character" id="new_{{ segment.id }}" hidden>Nombre nuevo
+                  <input name="new_{{ segment.id }}" autocomplete="off">
+                </label>
+              </div>
+            </article>
+          {% else %}
+            <div class="panel empty-state">No hay diálogos para los filtros seleccionados.</div>
+          {% endfor %}
+        </div>
+
+        {% if dialogues %}<button class="secondary-button save-review" type="submit">Guardar cambios visibles</button>{% endif %}
+      </form>
+
+      {% if total_pages > 1 %}
+        <nav class="pagination" aria-label="Paginación">
+          {% if page > 1 %}<a href="?page={{ page - 1 }}&speaker={{ speaker_filter }}{% if chapter_filter %}&chapter={{ chapter_filter }}{% endif %}">← Anterior</a>{% endif %}
+          <span>Página {{ page }} de {{ total_pages }}</span>
+          {% if page < total_pages %}<a href="?page={{ page + 1 }}&speaker={{ speaker_filter }}{% if chapter_filter %}&chapter={{ chapter_filter }}{% endif %}">Siguiente →</a>{% endif %}
+        </nav>
+      {% endif %}
+
+      <section class="panel generate-panel">
+        <div>
+          <p class="step">GENERACIÓN DEFINITIVA</p>
+          <h2>Crear el audiolibro revisado</h2>
+          {% if project.unresolved_count %}
+            <p class="warning-copy"><strong>{{ project.unresolved_count }}</strong> segmentos de diálogo todavía tienen un speaker desconocido. Puedes continuar si lo deseas.</p>
+          {% else %}
+            <p>Todos los diálogos tienen un speaker asignado.</p>
+          {% endif %}
+        </div>
+        <form action="{{ url_for('generate_audiobook', processing_id=project.processing_id) }}" method="post" data-unknown-count="{{ project.unresolved_count }}" class="generate-form">
+          <button class="primary-button" type="submit">Generate audiobook</button>
+        </form>
+      </section>
+    </div>
+  </section>
+
+  <script>
+    document.querySelectorAll(".speaker-select").forEach((select) => {
+      const toggle = () => {
+        const target = document.getElementById(select.dataset.newTarget);
+        target.hidden = select.value !== "__new__";
+        target.querySelector("input").required = select.value === "__new__";
+      };
+      select.addEventListener("change", toggle);
+      toggle();
+    });
+
+    document.querySelectorAll(".preview-button").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const form = button.closest("form");
+        const player = form.querySelector(".preview-player");
+        button.disabled = true;
+        button.textContent = "Generando…";
+        try {
+          const response = await fetch(button.dataset.previewUrl, { method: "POST", body: new FormData(form) });
+          if (!response.ok) throw new Error("Preview unavailable");
+          player.src = URL.createObjectURL(await response.blob());
+          player.hidden = false;
+          await player.play();
+        } catch (error) {
+          window.alert("No se pudo generar el preview de esta voz.");
+        } finally {
+          button.disabled = false;
+          button.textContent = "Preview";
+        }
+      });
+    });
+
+    document.querySelectorAll(".generate-form").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        const count = Number(form.dataset.unknownCount);
+        if (count && !window.confirm(`${count} diálogos siguen como Unknown. ¿Generar de todos modos?`)) event.preventDefault();
+      });
+    });
+  </script>
+{% endblock %}

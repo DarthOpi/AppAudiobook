@@ -13,7 +13,7 @@
     <div>
       <p class="step">01 · Selecciona tu documento</p>
       <h2 id="upload-title">Crea un audiolibro</h2>
-      <p>Analizaremos capítulos, diálogos y personajes antes de asignar las voces.</p>
+      <p>Analizaremos capítulos, diálogos y personajes para que puedas revisarlos antes de generar el audio.</p>
     </div>
 
     {% if error %}
@@ -30,7 +30,7 @@
         <span class="file-hint">TXT, PDF o DOCX · máximo {{ max_upload_mb }} MiB</span>
         <input id="document" name="document" type="file" accept=".txt,.pdf,.docx" required>
       </label>
-      <button class="primary-button" type="submit">Generar audiolibro</button>
+      <button class="primary-button" type="submit">Analizar documento</button>
     </form>
   </section>
 
