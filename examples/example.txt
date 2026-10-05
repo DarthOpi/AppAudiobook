@@ -1,4 +1,7 @@
-Bienvenido a Smart Audiobook.
+Pedro entró en la habitación.
 
-Esta es la primera versión del proyecto. Su objetivo es leer un archivo de texto y convertirlo en un archivo de audio mediante una voz instalada en el sistema.
+—¿Dónde estabas? —preguntó María.
 
+—Trabajando —respondió Pedro.
+
+María cerró la puerta.
