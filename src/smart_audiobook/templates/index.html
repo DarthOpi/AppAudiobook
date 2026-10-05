@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Smart Audiobook · Crear audiolibro{% endblock %}
+
+{% block content %}
+  <section class="hero">
+    <p class="eyebrow">DOCUMENT TO AUDIO</p>
+    <h1>Convierte una historia en una experiencia sonora.</h1>
+    <p class="hero-copy">Convert documents into AI-powered audiobooks with automatic narrator and character voices.</p>
+  </section>
+
+  <section class="upload-card" aria-labelledby="upload-title">
+    <div>
+      <p class="step">01 · Selecciona tu documento</p>
+      <h2 id="upload-title">Crea un audiolibro</h2>
+      <p>Analizaremos capítulos, diálogos y personajes antes de asignar las voces.</p>
+    </div>
+
+    {% if error %}
+      <div class="alert" role="alert">
+        <strong>No se pudo procesar el archivo.</strong>
+        <span>{{ error }}</span>
+      </div>
+    {% endif %}
+
+    <form class="upload-form" action="{{ url_for('upload_document') }}" method="post" enctype="multipart/form-data">
+      <label class="file-picker" for="document">
+        <span class="file-icon" aria-hidden="true">↑</span>
+        <span class="file-title" id="file-title">Selecciona un archivo</span>
+        <span class="file-hint">TXT, PDF o DOCX · máximo {{ max_upload_mb }} MiB</span>
+        <input id="document" name="document" type="file" accept=".txt,.pdf,.docx" required>
+      </label>
+      <button class="primary-button" type="submit">Generar audiolibro</button>
+    </form>
+  </section>
+
+  <section class="feature-grid" aria-label="Características principales">
+    <article>
+      <span>01</span>
+      <h3>Estructura automática</h3>
+      <p>Detecta prólogos, capítulos y secciones habituales de novelas.</p>
+    </article>
+    <article>
+      <span>02</span>
+      <h3>Voces por personaje</h3>
+      <p>Distingue narración y diálogo mediante reglas y Gemini opcional.</p>
+    </article>
+    <article>
+      <span>03</span>
+      <h3>Audio organizado</h3>
+      <p>Reproduce o descarga cada capítulo y el audiolibro completo.</p>
+    </article>
+  </section>
+
+  <script>
+    const input = document.querySelector("#document");
+    const title = document.querySelector("#file-title");
+    input.addEventListener("change", () => {
+      title.textContent = input.files.length ? input.files[0].name : "Selecciona un archivo";
+    });
+  </script>
+{% endblock %}

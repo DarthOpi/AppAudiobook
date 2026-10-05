@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}{{ result.analysis.document.title }} · Smart Audiobook{% endblock %}
+
+{% block content %}
+  <section class="result-heading">
+    <div>
+      <p class="eyebrow">AUDIOBOOK READY</p>
+      <h1>{{ result.analysis.document.title }}</h1>
+      <p>{{ source_name }} · {{ result.analysis.document.format | upper }}</p>
+    </div>
+    <a class="secondary-button" href="{{ url_for('home') }}">Procesar otro libro</a>
+  </section>
+
+  <section class="stats-grid" aria-label="Estadísticas del documento">
+    <article><strong>{{ result.analysis.chapters | length }}</strong><span>capítulos</span></article>
+    <article><strong>{{ result.analysis.characters | length }}</strong><span>personajes</span></article>
+    <article><strong>{{ result.segment_count }}</strong><span>segmentos</span></article>
+    <article><strong>{{ result.word_count }}</strong><span>palabras</span></article>
+  </section>
+
+  <section class="content-grid">
+    <div class="main-column">
+      <article class="panel full-audio">
+        <div class="panel-heading">
+          <div>
+            <p class="step">AUDIOLIBRO COMPLETO</p>
+            <h2>Escuchar de principio a fin</h2>
+          </div>
+          <a class="download-link" href="{{ url_for('download_audio', job_id=job_id, filename=result.output.full_audiobook.name) }}">Descargar WAV</a>
+        </div>
+        <audio controls preload="metadata" src="{{ url_for('play_audio', job_id=job_id, filename=result.output.full_audiobook.name) }}">
+          Tu navegador no soporta audio HTML5.
+        </audio>
+      </article>
+
+      <section class="panel" aria-labelledby="chapters-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step">CAPÍTULOS</p>
+            <h2 id="chapters-title">Audio por secciones</h2>
+          </div>
+        </div>
+        <ol class="chapter-list">
+          {% for chapter in chapters %}
+            <li>
+              <div class="chapter-copy">
+                <span>{{ "%02d" | format(chapter.number) }}</span>
+                <h3>{{ chapter.title }}</h3>
+              </div>
+              <audio controls preload="none" src="{{ url_for('play_audio', job_id=job_id, filename=chapter.filename) }}">
+                Tu navegador no soporta audio HTML5.
+              </audio>
+              <a class="download-link" href="{{ url_for('download_audio', job_id=job_id, filename=chapter.filename) }}">Descargar</a>
+            </li>
+          {% endfor %}
+        </ol>
+      </section>
+    </div>
+
+    <aside class="panel characters" aria-labelledby="characters-title">
+      <p class="step">REPARTO DE VOCES</p>
+      <h2 id="characters-title">Personajes detectados</h2>
+      <ul>
+        {% for character, voice in result.output.voice_assignments.items() %}
+          <li>
+            <span class="avatar" aria-hidden="true">{{ character[0] | upper }}</span>
+            <div>
+              <strong>{{ character }}</strong>
+              <span title="{{ voice }}">{{ voice }}</span>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    </aside>
+  </section>
+{% endblock %}
