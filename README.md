@@ -1,8 +1,8 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.4** acepta TXT, PDF y DOCX, normaliza el texto, detecta capítulos, identifica hablantes y genera audio por capítulo y para el libro completo.
+Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.5** incorpora una interfaz web con FastAPI sin abandonar la CLI: ambas utilizan el mismo servicio de aplicación y el mismo pipeline de documentos, personajes, voces y TTS.
 
-## Qué incluye V0.4
+## Qué incluye V0.5
 
 - Carga automática de `.txt`, `.pdf` y `.docx` mediante una interfaz común.
 - Modelo interno independiente del formato de origen.
@@ -13,24 +13,29 @@ Smart Audiobook es un proyecto incremental para convertir novelas y novelas web 
 - Pipeline anterior completo: segmentación, reglas, Gemini opcional, personajes, voces y TTS local.
 - Un WAV por capítulo, un WAV completo y `metadata.json`.
 - Nombres de archivo portables y seguros.
+- Interfaz web responsive con templates HTML y CSS propio.
+- Upload validado de TXT, PDF y DOCX con límite de 20 MiB.
+- Página de resultado con capítulos, personajes, voces y estadísticas.
+- Reproducción HTML5 y descarga controlada de cada WAV.
+- Logging básico y eliminación inmediata de los uploads temporales.
 
-No incluye OCR, EPUB, descarga de novelas web, frontend, base de datos, autenticación, Docker, edición manual ni procesamiento paralelo avanzado.
+No incluye OCR, EPUB, descarga de novelas web, frontend separado, base de datos, autenticación, Docker, edición manual ni procesamiento asíncrono avanzado.
 
 ## Flujo
 
 ```text
-TXT / PDF / DOCX
-        ↓
-adaptador de carga
-        ↓
-Document + normalización
-        ↓
-detección de capítulos
-        ↓
-segmentación e identificación de hablantes
-        ↓
-asignación global de voces
-        ↓
+CLI ─────────┐
+             ↓
+      Application Service
+             ↑
+Web UI ──────┘
+             ↓
+     Document Pipeline
+             ↓
+    Speaker Detection
+             ↓
+            TTS
+             ↓
 WAV por capítulo + WAV completo + metadata.json
 ```
 
@@ -53,6 +58,18 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
+Para instalar la interfaz web:
+
+```powershell
+python -m pip install -e ".[web]"
+```
+
+Para desarrollo y tests web:
+
+```powershell
+python -m pip install -e ".[web,test]"
+```
+
 Para habilitar Gemini:
 
 ```powershell
@@ -67,6 +84,32 @@ GEMINI_API_KEY=tu_clave
 ```
 
 `.env` está ignorado por Git. Si la variable no existe, Smart Audiobook sigue funcionando con reglas locales y marca los diálogos ambiguos como `Unknown`.
+
+## Web interface
+
+Arranca el servidor desde la raíz del proyecto:
+
+```powershell
+uvicorn smart_audiobook.web:app --reload
+```
+
+Después abre [http://127.0.0.1:8000](http://127.0.0.1:8000).
+
+Flujo básico:
+
+1. Selecciona un TXT, PDF o DOCX de hasta 20 MiB.
+2. Pulsa **Generar audiolibro**.
+3. La web valida el archivo y llama al mismo `AudiobookApplicationService` que utiliza la CLI.
+4. La página de resultado muestra documento, capítulos, personajes, voces, segmentos y palabras aproximadas.
+5. Utiliza los reproductores HTML5 o los botones de descarga para cada capítulo y el audiolibro completo.
+
+Los uploads se guardan en una carpeta temporal y se eliminan al terminar, incluso si el procesamiento falla. Los resultados necesarios se conservan bajo:
+
+```text
+output/web/<job_id>/<nombre_libro>/
+```
+
+Los endpoints reciben un identificador UUID y un nombre previamente registrado. No aceptan rutas del sistema proporcionadas por el navegador ni permiten descargar archivos fuera del resultado correspondiente.
 
 ## Uso
 
@@ -191,6 +234,7 @@ Los binarios PDF y DOCX se pueden reconstruir con `tests/fixtures/build_fixtures
 
 ```text
 src/smart_audiobook/
+├── application.py            # Servicio compartido por CLI y web
 ├── audio.py                  # Síntesis ordenada y combinación WAV
 ├── book_processor.py         # Orquestación de libro, capítulos y metadatos
 ├── chapter_detection.py      # Heurísticas y estilos DOCX
@@ -205,18 +249,23 @@ src/smart_audiobook/
 ├── speaker_resolvers.py      # Contrato y reglas deterministas
 ├── text_normalizer.py        # Normalización explícita
 ├── tts.py                    # Motor de voz local
-└── voice_assignment.py       # Personaje → voz
+├── voice_assignment.py       # Personaje → voz
+├── web.py                    # Rutas FastAPI y registro temporal de resultados
+├── web_security.py           # Uploads, firmas y rutas permitidas
+├── templates/                # Páginas Jinja2
+└── static/                   # CSS responsive
 ```
 
-Los cargadores dependen de `DocumentLoader`, y la integración LLM depende de `SpeakerResolver`. Esta separación permite añadir formatos o sustituir Gemini sin modificar la lógica central.
+`AudiobookApplicationService` es el punto de entrada compartido. Los cargadores dependen de `DocumentLoader`, y la integración LLM depende de `SpeakerResolver`. Las rutas HTTP no implementan reglas de negocio: validan el borde web, llaman al servicio y convierten el resultado en una vista.
 
 ## Tests
 
 ```powershell
+python -m pip install -e ".[web,test]"
 python -m unittest discover -s tests -v
 ```
 
-La suite cubre los tres formatos, detección de capítulos, documento sin capítulos, archivos vacíos o corruptos, extensión no soportada, PDF protegido, PDF sin texto, páginas inusuales, normalización, nombres seguros, pipeline de salida y compatibilidad con las funciones anteriores. Gemini y el TTS se simulan cuando corresponde; las pruebas automatizadas no consumen API.
+La suite cubre el pipeline anterior y la web: página principal, uploads TXT/PDF/DOCX, extensión, contenido real, archivo vacío, límite de tamaño, sanitización, descarga, path traversal y errores del pipeline. Gemini y el TTS se simulan cuando corresponde; las pruebas automatizadas no consumen API ni generan voz real.
 
 ## Limitaciones conocidas
 
@@ -227,4 +276,8 @@ La suite cubre los tres formatos, detección de capítulos, documento sin capít
 - Solo se detectan diálogos con raya larga; las comillas aún no se tratan como diálogo.
 - Las reglas de hablante cubren un conjunto limitado de verbos de habla en español.
 - Si faltan voces, se reutilizan de forma cíclica.
-- La salida de audio de V0.4 es WAV, no MP3.
+- La generación web es síncrona; un documento grande mantiene abierta la petición hasta terminar.
+- Los identificadores de resultados viven en memoria y se pierden al reiniciar el servidor, aunque los WAV permanezcan en `output/web/`.
+- No existe limpieza programada de audiolibros ya generados.
+- No hay autenticación ni separación entre usuarios; V0.5 está pensada para uso local.
+- La salida de audio de V0.5 es WAV, no MP3.
