@@ -4,12 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-audiobook"
-version = "0.2.0"
-description = "Analiza archivos TXT y genera audiolibros con voces para narración y diálogo."
+version = "0.3.0"
+description = "Identifica hablantes y genera audiolibros con una voz por personaje."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "pyttsx3>=2.90,<3.0",
+]
+
+[project.optional-dependencies]
+llm = [
+    "google-genai>=1.0,<2.0",
+    "python-dotenv>=1.0,<2.0",
 ]
 
 [project.scripts]
