@@ -85,6 +85,11 @@ GEMINI_API_KEY=tu_clave
 
 `.env` está ignorado por Git. Si la variable no existe, Smart Audiobook sigue funcionando con reglas locales y marca los diálogos ambiguos como `Unknown`.
 
+La integración utiliza el SDK oficial `google-genai` y el modelo estable
+`gemini-3.5-flash-lite`, elegido por su baja latencia y coste. Gemini es solo
+el fallback: primero se aplican las reglas locales y no se le envían los
+diálogos que ya tienen una resolución fiable.
+
 ## Web interface
 
 Arranca el servidor desde la raíz del proyecto:
@@ -241,7 +246,10 @@ src/smart_audiobook/
 ├── characters.py             # Registro canónico de personajes
 ├── cli.py                    # Interfaz de línea de comandos
 ├── document_loaders.py       # Adaptadores TXT, PDF y DOCX
-├── gemini_resolver.py        # Adaptador aislado de Gemini
+├── gemini_provider.py        # Adaptador del SDK oficial de Gemini
+├── gemini_resolver.py        # Configuración por entorno y compatibilidad
+├── llm_providers.py          # Contrato independiente del proveedor LLM
+├── llm_resolver.py           # Prompt y validación del dominio
 ├── models.py                 # Document, Chapter y modelos de diálogo
 ├── output_files.py           # Nombres seguros y metadata.json
 ├── segmenter.py              # Narración frente a diálogo
@@ -256,7 +264,30 @@ src/smart_audiobook/
 └── static/                   # CSS responsive
 ```
 
-`AudiobookApplicationService` es el punto de entrada compartido. Los cargadores dependen de `DocumentLoader`, y la integración LLM depende de `SpeakerResolver`. Las rutas HTTP no implementan reglas de negocio: validan el borde web, llaman al servicio y convierten el resultado en una vista.
+`AudiobookApplicationService` es el punto de entrada compartido. Los cargadores dependen de `DocumentLoader`, y la integración LLM depende de `SpeakerResolver`. `LLMResolver` solo conoce el contrato `LLMProvider`; `GeminiProvider` encapsula el SDK de Google, por lo que otro proveedor puede sustituirlo sin cambiar la lógica de resolución. Las rutas HTTP no implementan reglas de negocio: validan el borde web, llaman al servicio y convierten el resultado en una vista.
+
+```text
+SpeakerIdentificationService
+          ↓
+      LLMResolver
+          ↓
+      LLMProvider
+          ↓
+    GeminiProvider → google-genai
+```
+
+### Comprobar el fallback de Gemini
+
+El repositorio incluye `examples/gemini_ambiguous.txt`, con un diálogo que las
+reglas no pueden atribuir de forma determinista. Ejecútalo con:
+
+```powershell
+smart-audiobook examples/gemini_ambiguous.txt --analyze-only
+```
+
+Con `GEMINI_API_KEY` en `.env`, los casos ambiguos se consultan a Gemini. Para
+comparar el comportamiento estrictamente local, repite el análisis con
+`--no-llm`; esos casos se mantienen como `Unknown`.
 
 ## Tests
 
