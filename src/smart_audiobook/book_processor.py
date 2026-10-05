@@ -40,6 +40,7 @@ class BookOutput:
     chapter_files: tuple[Path, ...]
     full_audiobook: Path
     metadata: Path
+    voice_assignments: dict[str, str]
 
 
 def analyze_book(
@@ -111,4 +112,5 @@ def generate_book(
         chapter_files=tuple(chapter_files),
         full_audiobook=full_audiobook,
         metadata=metadata_path,
+        voice_assignments=dict(voices_by_speaker),
     )
