@@ -25,6 +25,8 @@ dist/
 # Generated audio
 output/*
 !output/.gitkeep
+work/*
+!work/.gitkeep
 
 # Editors and operating systems
 .idea/
