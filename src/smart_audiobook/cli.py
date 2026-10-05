@@ -5,12 +5,11 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from smart_audiobook.audio import generate_audiobook
+from smart_audiobook.book_processor import analyze_book, generate_book
+from smart_audiobook.document_loaders import DocumentLoadError, load_document
 from smart_audiobook.gemini_resolver import build_gemini_resolver_from_environment
-from smart_audiobook.segmenter import segment_text
 from smart_audiobook.speaker_identification import SpeakerIdentificationService
 from smart_audiobook.speaker_resolvers import RuleBasedSpeakerResolver
-from smart_audiobook.text_reader import TextFileError, read_text_file
 from smart_audiobook.tts import SpeechGenerationError
 
 
@@ -18,24 +17,28 @@ def build_parser() -> argparse.ArgumentParser:
     """Create the command-line argument parser."""
     parser = argparse.ArgumentParser(
         prog="smart-audiobook",
-        description="Convierte un archivo TXT en un archivo de audio WAV.",
+        description="Convierte documentos TXT, PDF o DOCX en un audiolibro WAV.",
     )
-    parser.add_argument("input", type=Path, help="Ruta del archivo TXT de entrada.")
+    parser.add_argument("input", type=Path, help="Ruta del documento TXT, PDF o DOCX.")
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="Ruta del WAV de salida (por defecto: output/<nombre>.wav).",
+        default=Path("output"),
+        help=(
+            "Carpeta raíz de salida (por defecto: output) o ruta .wav "
+            "compatible con versiones anteriores."
+        ),
     )
     parser.add_argument(
         "--show-segments",
         action="store_true",
-        help="Muestra por consola el análisis de narración y diálogo.",
+        help="Muestra el análisis de narración y diálogo por capítulo.",
     )
     parser.add_argument(
         "--analyze-only",
         action="store_true",
-        help="Muestra el análisis sin generar audio.",
+        help="Carga, divide y analiza el documento sin generar audio.",
     )
     parser.add_argument(
         "--no-llm",
@@ -48,40 +51,60 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the Smart Audiobook command-line application."""
     args = build_parser().parse_args(argv)
-    output_path = args.output or Path("output") / f"{args.input.stem}.wav"
 
     try:
-        text = read_text_file(args.input)
-        segments = segment_text(text)
+        document = load_document(args.input)
         llm_resolver = (
             None if args.no_llm else build_gemini_resolver_from_environment()
         )
-        analysis = SpeakerIdentificationService(
-            rule_resolver=RuleBasedSpeakerResolver(),
-            llm_resolver=llm_resolver,
-        ).identify(segments)
+        analysis = analyze_book(
+            document,
+            SpeakerIdentificationService(
+                rule_resolver=RuleBasedSpeakerResolver(),
+                llm_resolver=llm_resolver,
+            ),
+        )
 
         if args.show_segments or args.analyze_only:
             print(
                 json.dumps(
-                    [segment.as_dict() for segment in analysis.segments],
+                    {
+                        "title": document.title,
+                        "format": document.format,
+                        "chapters": [
+                            {
+                                "number": chapter.number,
+                                "title": chapter.title,
+                                "segments": [
+                                    segment.as_dict() for segment in chapter.segments
+                                ],
+                            }
+                            for chapter in analysis.chapters
+                        ],
+                        "characters": list(analysis.characters),
+                    },
                     ensure_ascii=False,
                     indent=2,
                 )
             )
-            print("\nCharacters detected:")
-            for character in analysis.characters:
-                print(f"- {character}")
 
         if args.analyze_only:
             return 0
 
-        generated_file = generate_audiobook(analysis.segments, output_path)
-    except (TextFileError, SpeechGenerationError) as error:
+        legacy_output = args.output if args.output.suffix.casefold() == ".wav" else None
+        output_root = args.output.parent if legacy_output else args.output
+        generated = generate_book(
+            analysis,
+            output_root,
+            full_audiobook_path=legacy_output,
+        )
+    except (DocumentLoadError, SpeechGenerationError) as error:
         print(f"Error: {error}")
         return 1
 
-    print(f"Audio generado correctamente: {generated_file.resolve()}")
+    print(f"Audiolibro generado correctamente: {generated.directory.resolve()}")
+    print(f"Audio completo: {generated.full_audiobook.resolve()}")
+    print(f"Metadatos: {generated.metadata.resolve()}")
     return 0
 
 

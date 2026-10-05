@@ -3,7 +3,7 @@
 import tempfile
 import wave
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from smart_audiobook.models import TextSegment
 from smart_audiobook.tts import (
@@ -14,16 +14,20 @@ from smart_audiobook.tts import (
 from smart_audiobook.voice_assignment import assign_voices
 
 
-def generate_audiobook(segments: Sequence[TextSegment], output_path: Path) -> Path:
+def generate_audiobook(
+    segments: Sequence[TextSegment],
+    output_path: Path,
+    voices_by_speaker: Mapping[str, str] | None = None,
+) -> Path:
     """Synthesize ordered segments with separate narration and dialogue voices."""
     if not segments:
         raise SpeechGenerationError("No hay segmentos de texto para convertir.")
 
-    voice_ids = get_available_voice_ids()
-    if not voice_ids:
-        raise SpeechGenerationError("No se encontraron voces instaladas.")
-
-    voices_by_speaker = assign_voices(segments, voice_ids)
+    if voices_by_speaker is None:
+        voice_ids = get_available_voice_ids()
+        if not voice_ids:
+            raise SpeechGenerationError("No se encontraron voces instaladas.")
+        voices_by_speaker = assign_voices(segments, voice_ids)
 
     with tempfile.TemporaryDirectory(prefix="smart-audiobook-") as directory:
         temporary_directory = Path(directory)

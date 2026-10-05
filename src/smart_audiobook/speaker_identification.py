@@ -32,9 +32,13 @@ class SpeakerIdentificationService:
         self._context_window = context_window
         self._llm_cache: dict[tuple[object, ...], SpeakerResolution | None] = {}
 
-    def identify(self, segments: Sequence[TextSegment]) -> SpeakerAnalysis:
+    def identify(
+        self,
+        segments: Sequence[TextSegment],
+        registry: CharacterRegistry | None = None,
+    ) -> SpeakerAnalysis:
         """Return segments enriched with canonical speaker names."""
-        registry = CharacterRegistry()
+        registry = registry or CharacterRegistry()
         resolved_segments = list(segments)
 
         for index, segment in enumerate(resolved_segments):
@@ -85,4 +89,3 @@ class SpeakerIdentificationService:
         if cache_key not in self._llm_cache:
             self._llm_cache[cache_key] = self._llm_resolver.resolve(context)
         return self._llm_cache[cache_key]
-
