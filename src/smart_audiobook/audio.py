@@ -11,6 +11,7 @@ from smart_audiobook.tts import (
     get_available_voice_ids,
     synthesize_to_wav,
 )
+from smart_audiobook.voice_assignment import assign_voices
 
 
 def generate_audiobook(segments: Sequence[TextSegment], output_path: Path) -> Path:
@@ -19,15 +20,10 @@ def generate_audiobook(segments: Sequence[TextSegment], output_path: Path) -> Pa
         raise SpeechGenerationError("No hay segmentos de texto para convertir.")
 
     voice_ids = get_available_voice_ids()
-    if len(voice_ids) < 2:
-        raise SpeechGenerationError(
-            "Se necesitan al menos dos voces instaladas para generar el audiolibro."
-        )
+    if not voice_ids:
+        raise SpeechGenerationError("No se encontraron voces instaladas.")
 
-    voices_by_type = {
-        "narration": voice_ids[0],
-        "dialogue": voice_ids[1],
-    }
+    voices_by_speaker = assign_voices(segments, voice_ids)
 
     with tempfile.TemporaryDirectory(prefix="smart-audiobook-") as directory:
         temporary_directory = Path(directory)
@@ -38,7 +34,7 @@ def generate_audiobook(segments: Sequence[TextSegment], output_path: Path) -> Pa
             synthesize_to_wav(
                 segment.text,
                 segment_path,
-                voice_id=voices_by_type[segment.type],
+                voice_id=voices_by_speaker[segment.speaker],
             )
             segment_files.append(segment_path)
 
