@@ -4,11 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-audiobook"
-version = "0.3.0"
-description = "Identifica hablantes y genera audiolibros con una voz por personaje."
+version = "0.4.0"
+description = "Convierte documentos estructurados en audiolibros por capítulos."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "pypdf>=6.0,<7.0",
+    "python-docx>=1.2,<2.0",
     "pyttsx3>=2.90,<3.0",
 ]
 

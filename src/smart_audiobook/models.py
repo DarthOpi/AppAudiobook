@@ -1,13 +1,44 @@
 """Domain models used by the text analysis pipeline."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 SegmentType = Literal["narration", "dialogue"]
 ResolutionSource = Literal["rule", "llm", "unknown"]
+DocumentFormat = Literal["txt", "pdf", "docx"]
 
 NARRATOR = "Narrator"
 UNKNOWN_SPEAKER = "Unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentBlock:
+    """A normalized block extracted from a source document."""
+
+    text: str
+    heading_level: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Chapter:
+    """A logical, ordered section of a document."""
+
+    number: int
+    title: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class Document:
+    """Format-independent representation used by the audiobook pipeline."""
+
+    title: str
+    source_path: Path
+    format: DocumentFormat
+    full_text: str
+    chapters: tuple[Chapter, ...] = ()
+    blocks: tuple[DocumentBlock, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
