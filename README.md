@@ -1,27 +1,30 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto personal e incremental para convertir documentos en audiolibros. La versión **V0.1** tiene un alcance intencionadamente pequeño: lee un archivo TXT y genera un archivo WAV mediante síntesis de voz local.
+Smart Audiobook es un proyecto personal e incremental para convertir documentos en audiolibros. La versión **V0.2** analiza un archivo TXT, distingue narración y diálogo mediante reglas sencillas y genera un único WAV usando una voz para cada tipo de fragmento.
 
-## Alcance de la V0.1
+## Funcionalidades de la V0.2
 
-- Lectura de archivos `.txt` en UTF-8.
-- Validación del archivo de entrada y de su contenido.
-- Conversión del texto a voz con el motor instalado en el sistema operativo.
-- Generación de un archivo `.wav`.
-- Interfaz de línea de comandos.
+- Lectura y validación de archivos `.txt` en UTF-8.
+- Detección de diálogos escritos con raya larga española (`—`).
+- Separación de diálogo y atribución cuando aparecen en la misma línea.
+- Representación ordenada de los fragmentos como `narration` o `dialogue`.
+- Visualización del análisis en JSON desde la terminal.
+- Síntesis con una voz para narración y otra para todos los diálogos.
+- Combinación de los fragmentos en un solo archivo WAV.
+- Eliminación automática de los audios temporales.
 
-Esta versión no incluye detección de personajes, inteligencia artificial, PDF, DOCX, interfaz web, base de datos ni autenticación.
+Esta versión no identifica personajes ni utiliza inteligencia artificial.
 
 ## Requisitos
 
 - Python 3.10 o posterior.
-- Un motor de síntesis de voz disponible en el sistema operativo.
+- Al menos dos voces disponibles en el motor de síntesis del sistema operativo.
 
-La aplicación utiliza `pyttsx3`, por lo que no necesita claves API ni envía el texto a un servicio externo. En Windows utiliza las voces SAPI instaladas en el equipo.
+La aplicación utiliza `pyttsx3`, por lo que no necesita claves API ni envía el texto a servicios externos. En Windows utiliza las voces SAPI instaladas en el equipo.
 
 ## Instalación
 
-Desde la raíz del proyecto, crea y activa un entorno virtual:
+Desde la raíz del proyecto:
 
 ```powershell
 python -m venv .venv
@@ -32,22 +35,115 @@ python -m pip install -e .
 
 ## Uso
 
-Para convertir el texto incluido como ejemplo:
+Generar el audiolibro del ejemplo:
 
 ```powershell
 smart-audiobook examples/example.txt
 ```
 
-El audio se guardará en `output/example.wav`. También puedes elegir otro destino:
+El resultado se guardará en `output/example.wav`. Para elegir otro destino:
 
 ```powershell
 smart-audiobook examples/example.txt --output output/mi_audiolibro.wav
 ```
 
-Como alternativa al comando instalado:
+Mostrar el análisis y generar también el audio:
 
 ```powershell
-python -m smart_audiobook examples/example.txt
+smart-audiobook examples/example.txt --show-segments
+```
+
+Mostrar únicamente el análisis, sin generar audio:
+
+```powershell
+smart-audiobook examples/example.txt --analyze-only
+```
+
+También se puede ejecutar como módulo:
+
+```powershell
+python -m smart_audiobook examples/example.txt --analyze-only
+```
+
+## Ejemplo de segmentación
+
+Entrada:
+
+```text
+Pedro entró en la habitación.
+
+—¿Dónde estabas? —preguntó María.
+
+—Trabajando —respondió Pedro.
+
+María cerró la puerta.
+```
+
+Resultado:
+
+```json
+[
+  {
+    "type": "narration",
+    "text": "Pedro entró en la habitación."
+  },
+  {
+    "type": "dialogue",
+    "text": "¿Dónde estabas?"
+  },
+  {
+    "type": "narration",
+    "text": "preguntó María."
+  },
+  {
+    "type": "dialogue",
+    "text": "Trabajando"
+  },
+  {
+    "type": "narration",
+    "text": "respondió Pedro."
+  },
+  {
+    "type": "narration",
+    "text": "María cerró la puerta."
+  }
+]
+```
+
+## Cómo funciona la segmentación
+
+Cada línea no vacía se procesa en orden:
+
+1. Si no comienza con `—`, se clasifica como narración.
+2. Si comienza con `—`, el primer fragmento se clasifica como diálogo.
+3. Las rayas siguientes de esa línea alternan entre narración y diálogo.
+4. Los fragmentos vacíos se descartan sin alterar el orden de los demás.
+
+Este enfoque permite separar construcciones como `—Hola —dijo María.` sin intentar adivinar quién habla.
+
+## Arquitectura
+
+```text
+AppAudiobook/
+├── examples/
+│   └── example.txt
+├── output/                         # Audios finales, ignorados por Git
+├── src/
+│   └── smart_audiobook/
+│       ├── __init__.py
+│       ├── __main__.py
+│       ├── audio.py                # Orquestación y combinación WAV
+│       ├── cli.py                  # Interfaz de línea de comandos
+│       ├── models.py               # Modelo TextSegment
+│       ├── segmenter.py            # Reglas de segmentación
+│       ├── text_reader.py          # Lectura y validación del TXT
+│       └── tts.py                  # Síntesis con voces locales
+├── tests/
+│   ├── test_segmenter.py
+│   └── test_text_reader.py
+├── .gitignore
+├── pyproject.toml
+└── README.md
 ```
 
 ## Pruebas
@@ -56,26 +152,20 @@ python -m smart_audiobook examples/example.txt
 python -m unittest discover -s tests -v
 ```
 
-## Estructura
+Las pruebas de segmentación cubren narración, diálogo aislado, diálogo con atribución, varias líneas alternadas y texto vacío.
 
-```text
-AppAudiobook/
-├── examples/                  # Textos de entrada de ejemplo
-├── output/                    # Audios generados, ignorados por Git
-├── src/
-│   └── smart_audiobook/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── cli.py             # Interfaz de línea de comandos
-│       ├── text_reader.py     # Lectura y validación del TXT
-│       └── tts.py             # Conversión de texto a audio
-├── tests/                     # Pruebas automatizadas
-├── .gitignore
-├── pyproject.toml
-└── README.md
-```
+## Limitaciones actuales
+
+- Solo se detecta diálogo en líneas cuyo primer carácter útil es una raya larga (`—`).
+- No se reconocen diálogos delimitados únicamente por comillas.
+- No se identifica al personaje que habla.
+- La primera voz instalada se usa para narración y la segunda para diálogo.
+- Los saltos de línea vacíos no se conservan como segmentos ni como pausas explícitas.
+- Los fragmentos WAV deben compartir el formato producido por el motor local.
+
+La V0.2 no incluye LLM, servicios de IA, PDF, DOCX, frontend, base de datos, autenticación, biblioteca ni Docker.
 
 ## Credenciales
 
-La V0.1 no utiliza servicios externos ni necesita credenciales. Si una versión futura las requiere, se cargarán mediante variables de entorno; los archivos `.env` están excluidos del control de versiones.
+La aplicación no utiliza servicios externos ni necesita credenciales. Si una versión futura las requiere, se cargarán mediante variables de entorno; los archivos `.env` están excluidos del control de versiones.
 
