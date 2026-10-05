@@ -1,0 +1,15 @@
+Smart Audiobook fixture
+
+Prólogo
+La tormenta se acercaba a la ciudad.
+
+Capítulo 1: La llegada
+María abrió la puerta.
+—Ya estamos aquí —dijo María.
+
+Capítulo II
+Pedro miró hacia la ventana.
+—Será mejor esperar —respondió Pedro.
+
+Epílogo
+La ciudad volvió a quedar en silencio.
