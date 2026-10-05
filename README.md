@@ -1,8 +1,8 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.5** incorpora una interfaz web con FastAPI sin abandonar la CLI: ambas utilizan el mismo servicio de aplicación y el mismo pipeline de documentos, personajes, voces y TTS.
+Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.6** incorpora una fase web de revisión de personajes y voces antes del TTS, sin abandonar el modo automático de la CLI.
 
-## Qué incluye V0.5
+## Qué incluye V0.6
 
 - Carga automática de `.txt`, `.pdf` y `.docx` mediante una interfaz común.
 - Modelo interno independiente del formato de origen.
@@ -15,27 +15,36 @@ Smart Audiobook es un proyecto incremental para convertir novelas y novelas web 
 - Nombres de archivo portables y seguros.
 - Interfaz web responsive con templates HTML y CSS propio.
 - Upload validado de TXT, PDF y DOCX con límite de 20 MiB.
+- Estado temporal por UUID persistido en JSON, sin base de datos.
+- Página de revisión con speakers editables, filtros y paginación.
+- Creación, renombrado y fusión normalizada de personajes.
+- Catálogo de voces desacoplado mediante `TTSProvider`.
+- Selección manual y preview cacheado de voces.
+- Generación final desde el análisis revisado, sin repetir Gemini.
 - Página de resultado con capítulos, personajes, voces y estadísticas.
 - Reproducción HTML5 y descarga controlada de cada WAV.
 - Logging básico y eliminación inmediata de los uploads temporales.
 
-No incluye OCR, EPUB, descarga de novelas web, frontend separado, base de datos, autenticación, Docker, edición manual ni procesamiento asíncrono avanzado.
+No incluye OCR, EPUB, descarga de novelas web, frontend separado, base de datos, autenticación, Docker, biblioteca permanente ni procesamiento asíncrono avanzado.
 
 ## Flujo
 
 ```text
-CLI ─────────┐
-             ↓
-      Application Service
-             ↑
-Web UI ──────┘
-             ↓
-     Document Pipeline
-             ↓
-    Speaker Detection
-             ↓
-            TTS
-             ↓
+Upload
+  ↓
+Document Pipeline
+  ↓
+Speaker Analysis
+  ↓
+work/<processing_id>/analysis.json
+  ↓
+Review UI
+  ├── Edit speakers
+  ├── Manage characters
+  └── Select and preview voices
+  ↓
+Final TTS generation
+  ↓
 WAV por capítulo + WAV completo + metadata.json
 ```
 
@@ -103,18 +112,51 @@ Después abre [http://127.0.0.1:8000](http://127.0.0.1:8000).
 Flujo básico:
 
 1. Selecciona un TXT, PDF o DOCX de hasta 20 MiB.
-2. Pulsa **Generar audiolibro**.
-3. La web valida el archivo y llama al mismo `AudiobookApplicationService` que utiliza la CLI.
-4. La página de resultado muestra documento, capítulos, personajes, voces, segmentos y palabras aproximadas.
-5. Utiliza los reproductores HTML5 o los botones de descarga para cada capítulo y el audiolibro completo.
+2. Pulsa **Analizar documento**.
+3. Revisa speakers, resuelve los `Unknown`, crea o combina personajes y selecciona voces.
+4. Usa **Preview** para escuchar una muestra corta de cada voz.
+5. Pulsa **Generate audiobook** cuando el reparto esté listo.
+6. Reproduce o descarga cada capítulo y el audiolibro completo.
 
-Los uploads se guardan en una carpeta temporal y se eliminan al terminar, incluso si el procesamiento falla. Los resultados necesarios se conservan bajo:
+El upload inicial se valida en una carpeta temporal. Después se crea un espacio de trabajo controlado, identificado exclusivamente mediante UUID:
 
 ```text
-output/web/<job_id>/<nombre_libro>/
+work/<processing_id>/
+├── source/<documento_sanitizado>
+├── analysis.json
+├── previews/<hash_de_voz>.wav
+└── audio/<nombre_libro>/
+    ├── 01_capitulo.wav
+    ├── full_audiobook.wav
+    └── metadata.json
 ```
 
-Los endpoints reciben un identificador UUID y un nombre previamente registrado. No aceptan rutas del sistema proporcionadas por el navegador ni permiten descargar archivos fuera del resultado correspondiente.
+`analysis.json` contiene el análisis editable, los identificadores de segmento, confianza, método de resolución, catálogo de voces y asignaciones. Recargar o filtrar la página reutiliza este estado: no vuelve a extraer el documento ni a ejecutar Gemini. Los endpoints validan el UUID y nunca utilizan nombres proporcionados por el navegador como rutas internas.
+
+## V0.6 – Character & Voice Review
+
+### Corregir speakers
+
+Cada diálogo muestra su ID, capítulo, confianza y método de detección. Selecciona otro personaje o `New character…` y pulsa **Guardar cambios visibles**. Los diálogos `Unknown` aparecen destacados y el filtro **Unknown only** permite revisarlos rápidamente.
+
+La lista se pagina de 50 en 50 y puede filtrarse por personaje o capítulo. Los filtros no repiten el análisis.
+
+### Gestionar personajes
+
+- **Renombrar** actualiza todos los segmentos asociados.
+- Si el nombre nuevo ya existe según su forma normalizada —ignorando mayúsculas, acentos y espacios triviales— ambos personajes se combinan.
+- **Fusionar personajes** mueve todos los segmentos del origen al destino y conserva una asignación de voz válida.
+- Los personajes creados desde un diálogo quedan disponibles para el resto del documento.
+
+### Seleccionar y previsualizar voces
+
+La barra lateral muestra las voces que ofrece el proveedor TTS local, incluyendo únicamente la metadata realmente disponible. Cada personaje puede elegir una voz distinta. **Preview** genera una frase corta en WAV y la conserva en caché por `processing_id` y voz.
+
+La interfaz depende de `TTSProvider`, no de `pyttsx3`. V0.6 implementa únicamente `LocalTTSProvider`; otros proveedores podrán añadirse sin cambiar la lógica de revisión.
+
+### Generar el audio definitivo
+
+Antes de generar se comprueba que existen voces, que `Narrator` tiene una y que todos los speakers utilizados tienen una selección válida. Los `Unknown` producen una advertencia y confirmación, pero no bloquean obligatoriamente la generación. El TTS recibe directamente el análisis revisado y no vuelve a invocar reglas ni Gemini.
 
 ## Uso
 
@@ -180,7 +222,7 @@ Ejemplo abreviado:
     "María": "identificador-voz-2"
   },
   "generated_at": "2026-10-05T18:00:00+00:00",
-  "source": "C:\\libros\\mi_libro.docx",
+  "source": "mi_libro.docx",
   "outputs": {
     "chapters": ["01_prologo.wav", "02_capitulo_1.wav"],
     "full_audiobook": "full_audiobook.wav"
@@ -252,19 +294,22 @@ src/smart_audiobook/
 ├── llm_resolver.py           # Prompt y validación del dominio
 ├── models.py                 # Document, Chapter y modelos de diálogo
 ├── output_files.py           # Nombres seguros y metadata.json
+├── review_service.py         # Edición consistente y generación revisada
+├── review_store.py           # Persistencia JSON temporal por UUID
 ├── segmenter.py              # Narración frente a diálogo
 ├── speaker_identification.py # Reglas, fallback y caché
 ├── speaker_resolvers.py      # Contrato y reglas deterministas
 ├── text_normalizer.py        # Normalización explícita
 ├── tts.py                    # Motor de voz local
+├── tts_providers.py          # Contrato TTS, catálogo y adaptador local
 ├── voice_assignment.py       # Personaje → voz
-├── web.py                    # Rutas FastAPI y registro temporal de resultados
+├── web.py                    # Rutas FastAPI del flujo análisis/revisión/generación
 ├── web_security.py           # Uploads, firmas y rutas permitidas
 ├── templates/                # Páginas Jinja2
 └── static/                   # CSS responsive
 ```
 
-`AudiobookApplicationService` es el punto de entrada compartido. Los cargadores dependen de `DocumentLoader`, y la integración LLM depende de `SpeakerResolver`. `LLMResolver` solo conoce el contrato `LLMProvider`; `GeminiProvider` encapsula el SDK de Google, por lo que otro proveedor puede sustituirlo sin cambiar la lógica de resolución. Las rutas HTTP no implementan reglas de negocio: validan el borde web, llaman al servicio y convierten el resultado en una vista.
+`AudiobookApplicationService` continúa siendo el punto de entrada compartido. La CLI conserva `process()` para el flujo automático; la web usa `analyze()` y solo llama a `generate()` después de la revisión. `ReviewService` aplica las ediciones y `ReviewProjectStore` persiste el estado. Las rutas HTTP validan el borde web y no contienen reglas de personajes, voces ni TTS.
 
 ```text
 SpeakerIdentificationService
@@ -292,11 +337,11 @@ comparar el comportamiento estrictamente local, repite el análisis con
 ## Tests
 
 ```powershell
-python -m pip install -e ".[web,test]"
+python -m pip install -e ".[web,test,llm]"
 python -m unittest discover -s tests -v
 ```
 
-La suite cubre el pipeline anterior y la web: página principal, uploads TXT/PDF/DOCX, extensión, contenido real, archivo vacío, límite de tamaño, sanitización, descarga, path traversal y errores del pipeline. Gemini y el TTS se simulan cuando corresponde; las pruebas automatizadas no consumen API ni generan voz real.
+La suite cubre el pipeline anterior y la web: upload, persistencia, edición de speakers, personajes nuevos, renombrado, fusión, normalización, voces, preview y caché, filtros, paginación, generación revisada, descargas y seguridad. Gemini y el TTS se simulan cuando corresponde; las pruebas automatizadas no consumen API ni generan voz real.
 
 ## Limitaciones conocidas
 
@@ -307,8 +352,8 @@ La suite cubre el pipeline anterior y la web: página principal, uploads TXT/PDF
 - Solo se detectan diálogos con raya larga; las comillas aún no se tratan como diálogo.
 - Las reglas de hablante cubren un conjunto limitado de verbos de habla en español.
 - Si faltan voces, se reutilizan de forma cíclica.
-- La generación web es síncrona; un documento grande mantiene abierta la petición hasta terminar.
-- Los identificadores de resultados viven en memoria y se pierden al reiniciar el servidor, aunque los WAV permanezcan en `output/web/`.
-- No existe limpieza programada de audiolibros ya generados.
+- El análisis y la generación web son síncronos; un documento grande mantiene abierta la petición hasta terminar.
+- El estado de revisión es temporal pero sobrevive a reinicios mientras permanezca su directorio bajo `work/`.
+- No existe todavía limpieza automática de espacios de trabajo antiguos.
 - No hay autenticación ni separación entre usuarios; V0.5 está pensada para uso local.
 - La salida de audio de V0.5 es WAV, no MP3.
