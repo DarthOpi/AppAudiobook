@@ -1,30 +1,53 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto personal e incremental para convertir documentos en audiolibros. La versión **V0.2** analiza un archivo TXT, distingue narración y diálogo mediante reglas sencillas y genera un único WAV usando una voz para cada tipo de fragmento.
+Smart Audiobook es un proyecto personal e incremental para convertir documentos en audiolibros. La versión **V0.3** analiza un TXT, separa narración y diálogo, identifica al personaje que habla y genera un único WAV asignando voces automáticamente.
 
-## Funcionalidades de la V0.2
+## Funcionalidades de la V0.3
 
 - Lectura y validación de archivos `.txt` en UTF-8.
-- Detección de diálogos escritos con raya larga española (`—`).
-- Separación de diálogo y atribución cuando aparecen en la misma línea.
-- Representación ordenada de los fragmentos como `narration` o `dialogue`.
-- Visualización del análisis en JSON desde la terminal.
-- Síntesis con una voz para narración y otra para todos los diálogos.
-- Combinación de los fragmentos en un solo archivo WAV.
-- Eliminación automática de los audios temporales.
+- Segmentación de narración y diálogos escritos con raya larga (`—`).
+- Identificación de hablantes mediante reglas deterministas.
+- Resolución opcional de casos ambiguos mediante Google Gemini.
+- Ventana limitada de contexto alrededor de cada diálogo.
+- Respuestas LLM estructuradas y validadas.
+- Caché en memoria para consultas idénticas durante una ejecución.
+- Normalización de nombres sin perder su primera grafía visible.
+- Lista de personajes detectados en la salida de análisis.
+- Asignación automática de una voz por personaje cuando hay voces suficientes.
+- Combinación ordenada de los fragmentos en un único WAV.
+- Eliminación automática de audios temporales.
 
-Esta versión no identifica personajes ni utiliza inteligencia artificial.
+## Flujo
+
+```text
+TXT
+ ↓
+segmentación de narración y diálogo
+ ↓
+reglas de identificación del hablante
+ ↓ solo si no hay resultado fiable
+Gemini opcional con contexto cercano
+ ↓
+segmentos con speaker + lista de personajes
+ ↓
+asignación automática de voces
+ ↓
+TTS local + combinación WAV
+ ↓
+audiolibro final
+```
 
 ## Requisitos
 
 - Python 3.10 o posterior.
-- Al menos dos voces disponibles en el motor de síntesis del sistema operativo.
+- Al menos una voz disponible en el motor de síntesis del sistema operativo.
+- Opcional: una clave de Gemini API para resolver diálogos ambiguos.
 
-La aplicación utiliza `pyttsx3`, por lo que no necesita claves API ni envía el texto a servicios externos. En Windows utiliza las voces SAPI instaladas en el equipo.
+La síntesis utiliza `pyttsx3`, por lo que el texto destinado al audio se procesa localmente. Solo el contexto de los diálogos ambiguos se envía a Gemini cuando la integración está instalada y existe `GEMINI_API_KEY`.
 
 ## Instalación
 
-Desde la raíz del proyecto:
+### Uso local sin LLM
 
 ```powershell
 python -m venv .venv
@@ -33,30 +56,62 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
+### Uso con Gemini
+
+Instala el extra opcional:
+
+```powershell
+python -m pip install -e ".[llm]"
+```
+
+Copia el archivo de ejemplo:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Edita `.env` y añade tu clave:
+
+```dotenv
+GEMINI_API_KEY=tu_clave
+```
+
+`.env` está ignorado por Git. Nunca subas una clave real al repositorio.
+
+La integración utiliza `gemini-3.1-flash-lite`, un modelo Flash-Lite orientado a tareas sencillas y de alto volumen. Google ofrece un nivel gratuito sujeto a sus límites y condiciones actuales. Consulta la [documentación de precios de Gemini](https://ai.google.dev/gemini-api/docs/pricing) antes de utilizarlo.
+
 ## Uso
 
-Generar el audiolibro del ejemplo:
+Generar el audiolibro:
 
 ```powershell
 smart-audiobook examples/example.txt
 ```
 
-El resultado se guardará en `output/example.wav`. Para elegir otro destino:
+Si existe una clave configurada, Gemini solo se consulta para los diálogos que las reglas no puedan resolver.
+
+Ejecutar explícitamente sin Gemini:
 
 ```powershell
-smart-audiobook examples/example.txt --output output/mi_audiolibro.wav
+smart-audiobook examples/example.txt --no-llm
 ```
 
-Mostrar el análisis y generar también el audio:
+Mostrar el análisis y generar audio:
 
 ```powershell
 smart-audiobook examples/example.txt --show-segments
 ```
 
-Mostrar únicamente el análisis, sin generar audio:
+Mostrar únicamente el análisis:
 
 ```powershell
 smart-audiobook examples/example.txt --analyze-only
+```
+
+Elegir otro archivo de salida:
+
+```powershell
+smart-audiobook examples/example.txt --output output/mi_audiolibro.wav
 ```
 
 También se puede ejecutar como módulo:
@@ -65,61 +120,69 @@ También se puede ejecutar como módulo:
 python -m smart_audiobook examples/example.txt --analyze-only
 ```
 
-## Ejemplo de segmentación
+## Ejemplo
 
-Entrada:
+Texto:
 
 ```text
-Pedro entró en la habitación.
-
 —¿Dónde estabas? —preguntó María.
-
-—Trabajando —respondió Pedro.
-
-María cerró la puerta.
 ```
 
-Resultado:
+Segmentos:
 
 ```json
 [
   {
-    "type": "narration",
-    "text": "Pedro entró en la habitación."
-  },
-  {
     "type": "dialogue",
+    "speaker": "María",
     "text": "¿Dónde estabas?"
   },
   {
     "type": "narration",
+    "speaker": "Narrator",
     "text": "preguntó María."
-  },
-  {
-    "type": "dialogue",
-    "text": "Trabajando"
-  },
-  {
-    "type": "narration",
-    "text": "respondió Pedro."
-  },
-  {
-    "type": "narration",
-    "text": "María cerró la puerta."
   }
 ]
 ```
 
-## Cómo funciona la segmentación
+## Identificación de personajes
 
-Cada línea no vacía se procesa en orden:
+### Resolución mediante reglas
 
-1. Si no comienza con `—`, se clasifica como narración.
-2. Si comienza con `—`, el primer fragmento se clasifica como diálogo.
-3. Las rayas siguientes de esa línea alternan entre narración y diálogo.
-4. Los fragmentos vacíos se descartan sin alterar el orden de los demás.
+Las reglas examinan la atribución narrativa inmediatamente posterior al diálogo. Reconocen verbos frecuentes como `dijo`, `respondió`, `preguntó`, `gritó`, `susurró`, `exclamó`, `contestó`, `añadió`, `replicó` y `murmuró` cuando van seguidos de un nombre propio.
 
-Este enfoque permite separar construcciones como `—Hola —dijo María.` sin intentar adivinar quién habla.
+Esta estrategia es rápida, determinista y no consume API.
+
+### Resolución mediante Gemini
+
+Si las reglas no encuentran una atribución fiable, el adaptador de Gemini recibe:
+
+- el diálogo actual;
+- hasta dos segmentos anteriores;
+- hasta dos segmentos posteriores;
+- los personajes conocidos hasta ese momento.
+
+Gemini debe devolver un objeto con `speaker` y `confidence`. La aplicación valida el JSON, el nombre y que la confianza esté entre 0 y 1. Ante una respuesta inválida, un error de red o falta de clave, el personaje queda como `Unknown` y la ejecución continúa.
+
+El resto de la aplicación depende únicamente del contrato `SpeakerResolver`; el SDK de Google está encapsulado en `GeminiSpeakerResolver`, por lo que otro proveedor puede añadirse sin cambiar la lógica de identificación.
+
+## Consistencia de nombres
+
+Los nombres se comparan ignorando mayúsculas, espacios redundantes y tildes. Por ejemplo, `María`, `MARÍA` y `Maria` comparten la misma identidad. La primera grafía encontrada se conserva para mostrarla al usuario.
+
+`Unknown` no se incorpora a la lista de personajes detectados.
+
+## Asignación de voces
+
+`voice_assignment.py` asigna voces por orden de primera aparición:
+
+```text
+Narrator → primera voz
+primer personaje → segunda voz
+segundo personaje → tercera voz
+```
+
+Si hay más personajes que voces instaladas, las voces se reutilizan de forma cíclica. La asignación está separada del TTS para permitir selección manual en una versión futura.
 
 ## Arquitectura
 
@@ -127,45 +190,44 @@ Este enfoque permite separar construcciones como `—Hola —dijo María.` sin i
 AppAudiobook/
 ├── examples/
 │   └── example.txt
-├── output/                         # Audios finales, ignorados por Git
-├── src/
-│   └── smart_audiobook/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── audio.py                # Orquestación y combinación WAV
-│       ├── cli.py                  # Interfaz de línea de comandos
-│       ├── models.py               # Modelo TextSegment
-│       ├── segmenter.py            # Reglas de segmentación
-│       ├── text_reader.py          # Lectura y validación del TXT
-│       └── tts.py                  # Síntesis con voces locales
+├── output/                              # Audios finales, ignorados por Git
+├── src/smart_audiobook/
+│   ├── audio.py                         # Orquestación y combinación WAV
+│   ├── characters.py                    # Normalización y registro de nombres
+│   ├── cli.py                           # Interfaz de línea de comandos
+│   ├── gemini_resolver.py               # Adaptador aislado de Gemini API
+│   ├── models.py                        # Modelos del dominio
+│   ├── segmenter.py                     # Narración frente a diálogo
+│   ├── speaker_identification.py        # Reglas, fallback y caché
+│   ├── speaker_resolvers.py             # Contrato y reglas deterministas
+│   ├── text_reader.py                   # Lectura y validación del TXT
+│   ├── tts.py                           # Síntesis con voces locales
+│   └── voice_assignment.py              # Personaje → voz
 ├── tests/
-│   ├── test_segmenter.py
-│   └── test_text_reader.py
+├── .env.example
 ├── .gitignore
 ├── pyproject.toml
 └── README.md
 ```
 
-## Pruebas
+## Tests
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-Las pruebas de segmentación cubren narración, diálogo aislado, diálogo con atribución, varias líneas alternadas y texto vacío.
+Las llamadas a Gemini están simuladas en los tests; la suite nunca depende de una API externa ni consume cuota.
 
-## Limitaciones actuales
+## Limitaciones conocidas
 
-- Solo se detecta diálogo en líneas cuyo primer carácter útil es una raya larga (`—`).
-- No se reconocen diálogos delimitados únicamente por comillas.
-- No se identifica al personaje que habla.
-- La primera voz instalada se usa para narración y la segunda para diálogo.
-- Los saltos de línea vacíos no se conservan como segmentos ni como pausas explícitas.
-- Los fragmentos WAV deben compartir el formato producido por el motor local.
+- Las reglas solo reconocen un conjunto pequeño de verbos de habla en español.
+- Las atribuciones indirectas o alejadas suelen necesitar Gemini.
+- Gemini puede inferir un personaje incorrecto incluso con una respuesta válida.
+- La ventana de contexto es deliberadamente pequeña y no sirve para libros enormes.
+- La caché solo dura durante la ejecución actual.
+- No se detectan diálogos delimitados únicamente por comillas.
+- No existe edición manual de personajes ni selección manual de voces.
+- El nivel gratuito de Gemini tiene cuotas y disponibilidad definidas por Google.
 
-La V0.2 no incluye LLM, servicios de IA, PDF, DOCX, frontend, base de datos, autenticación, biblioteca ni Docker.
-
-## Credenciales
-
-La aplicación no utiliza servicios externos ni necesita credenciales. Si una versión futura las requiere, se cargarán mediante variables de entorno; los archivos `.env` están excluidos del control de versiones.
+La V0.3 no incluye PDF, DOCX, frontend, biblioteca, usuarios, autenticación, base de datos, Docker ni procesamiento paralelo avanzado.
 
