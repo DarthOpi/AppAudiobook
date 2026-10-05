@@ -1,53 +1,50 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto personal e incremental para convertir documentos en audiolibros. La versión **V0.3** analiza un TXT, separa narración y diálogo, identifica al personaje que habla y genera un único WAV asignando voces automáticamente.
+Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.4** acepta TXT, PDF y DOCX, normaliza el texto, detecta capítulos, identifica hablantes y genera audio por capítulo y para el libro completo.
 
-## Funcionalidades de la V0.3
+## Qué incluye V0.4
 
-- Lectura y validación de archivos `.txt` en UTF-8.
-- Segmentación de narración y diálogos escritos con raya larga (`—`).
-- Identificación de hablantes mediante reglas deterministas.
-- Resolución opcional de casos ambiguos mediante Google Gemini.
-- Ventana limitada de contexto alrededor de cada diálogo.
-- Respuestas LLM estructuradas y validadas.
-- Caché en memoria para consultas idénticas durante una ejecución.
-- Normalización de nombres sin perder su primera grafía visible.
-- Lista de personajes detectados en la salida de análisis.
-- Asignación automática de una voz por personaje cuando hay voces suficientes.
-- Combinación ordenada de los fragmentos en un único WAV.
-- Eliminación automática de audios temporales.
+- Carga automática de `.txt`, `.pdf` y `.docx` mediante una interfaz común.
+- Modelo interno independiente del formato de origen.
+- Extracción de texto nativo en PDF; los PDF escaneados requieren OCR y se rechazan con un mensaje claro.
+- Lectura de párrafos y estilos de encabezado en DOCX.
+- Normalización conservadora que mantiene párrafos y diálogos con raya (`—`).
+- Detección de capítulos orientada a novelas y novelas web.
+- Pipeline anterior completo: segmentación, reglas, Gemini opcional, personajes, voces y TTS local.
+- Un WAV por capítulo, un WAV completo y `metadata.json`.
+- Nombres de archivo portables y seguros.
+
+No incluye OCR, EPUB, descarga de novelas web, frontend, base de datos, autenticación, Docker, edición manual ni procesamiento paralelo avanzado.
 
 ## Flujo
 
 ```text
-TXT
- ↓
-segmentación de narración y diálogo
- ↓
-reglas de identificación del hablante
- ↓ solo si no hay resultado fiable
-Gemini opcional con contexto cercano
- ↓
-segmentos con speaker + lista de personajes
- ↓
-asignación automática de voces
- ↓
-TTS local + combinación WAV
- ↓
-audiolibro final
+TXT / PDF / DOCX
+        ↓
+adaptador de carga
+        ↓
+Document + normalización
+        ↓
+detección de capítulos
+        ↓
+segmentación e identificación de hablantes
+        ↓
+asignación global de voces
+        ↓
+WAV por capítulo + WAV completo + metadata.json
 ```
+
+El formato se detecta por la extensión. Desde `Document` en adelante, el pipeline es el mismo para todos los orígenes.
 
 ## Requisitos
 
 - Python 3.10 o posterior.
-- Al menos una voz disponible en el motor de síntesis del sistema operativo.
-- Opcional: una clave de Gemini API para resolver diálogos ambiguos.
+- Una o más voces instaladas en el sistema operativo.
+- Opcional: `GEMINI_API_KEY` para resolver diálogos ambiguos.
 
-La síntesis utiliza `pyttsx3`, por lo que el texto destinado al audio se procesa localmente. Solo el contexto de los diálogos ambiguos se envía a Gemini cuando la integración está instalada y existe `GEMINI_API_KEY`.
+La síntesis usa `pyttsx3` y se ejecuta localmente. Gemini solo recibe contexto limitado de diálogos que las reglas no pueden resolver.
 
 ## Instalación
-
-### Uso local sin LLM
 
 ```powershell
 python -m venv .venv
@@ -56,159 +53,162 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-### Uso con Gemini
-
-Instala el extra opcional:
+Para habilitar Gemini:
 
 ```powershell
 python -m pip install -e ".[llm]"
-```
-
-Copia el archivo de ejemplo:
-
-```powershell
 Copy-Item .env.example .env
 ```
 
-Edita `.env` y añade tu clave:
+Después, añade la clave únicamente a `.env`:
 
 ```dotenv
 GEMINI_API_KEY=tu_clave
 ```
 
-`.env` está ignorado por Git. Nunca subas una clave real al repositorio.
-
-La integración utiliza `gemini-3.1-flash-lite`, un modelo Flash-Lite orientado a tareas sencillas y de alto volumen. Google ofrece un nivel gratuito sujeto a sus límites y condiciones actuales. Consulta la [documentación de precios de Gemini](https://ai.google.dev/gemini-api/docs/pricing) antes de utilizarlo.
+`.env` está ignorado por Git. Si la variable no existe, Smart Audiobook sigue funcionando con reglas locales y marca los diálogos ambiguos como `Unknown`.
 
 ## Uso
 
-Generar el audiolibro:
+Los tres formatos utilizan el mismo comando:
 
 ```powershell
-smart-audiobook examples/example.txt
+smart-audiobook novela.txt
+smart-audiobook novela.pdf
+smart-audiobook novela.docx
 ```
 
-Si existe una clave configurada, Gemini solo se consulta para los diálogos que las reglas no puedan resolver.
-
-Ejecutar explícitamente sin Gemini:
+También puede ejecutarse como módulo:
 
 ```powershell
-smart-audiobook examples/example.txt --no-llm
+python -m smart_audiobook novela.txt
 ```
 
-Mostrar el análisis y generar audio:
+Opciones útiles:
 
 ```powershell
-smart-audiobook examples/example.txt --show-segments
+# Analizar capítulos y personajes sin generar audio
+smart-audiobook novela.docx --analyze-only
+
+# Mostrar segmentos y generar audio
+smart-audiobook novela.pdf --show-segments
+
+# No utilizar Gemini aunque exista una clave
+smart-audiobook novela.txt --no-llm
+
+# Elegir la carpeta raíz de salida
+smart-audiobook novela.txt --output mis_audiolibros
+
+# Compatibilidad V0.1–V0.3: elegir directamente el WAV completo
+smart-audiobook novela.txt --output output/mi_audiolibro.wav
 ```
 
-Mostrar únicamente el análisis:
+## Resultado
 
-```powershell
-smart-audiobook examples/example.txt --analyze-only
-```
-
-Elegir otro archivo de salida:
-
-```powershell
-smart-audiobook examples/example.txt --output output/mi_audiolibro.wav
-```
-
-También se puede ejecutar como módulo:
-
-```powershell
-python -m smart_audiobook examples/example.txt --analyze-only
-```
-
-## Ejemplo
-
-Texto:
+Para un libro llamado `mi_libro`, el resultado es:
 
 ```text
-—¿Dónde estabas? —preguntó María.
+output/
+└── mi_libro/
+    ├── 01_prologo.wav
+    ├── 02_capitulo_1.wav
+    ├── 03_capitulo_2.wav
+    ├── full_audiobook.wav
+    └── metadata.json
 ```
 
-Segmentos:
+Se conserva WAV porque es la salida nativa del motor TTS local y no requiere instalar FFmpeg. `metadata.json` contiene título, formato, capítulos, personajes, voces, fecha, origen y nombres de salida; nunca incluye claves API.
+
+Ejemplo abreviado:
 
 ```json
-[
-  {
-    "type": "dialogue",
-    "speaker": "María",
-    "text": "¿Dónde estabas?"
+{
+  "title": "mi_libro",
+  "format": "docx",
+  "chapter_count": 3,
+  "detected_characters": ["Narrator", "María"],
+  "voice_assignments": {
+    "Narrator": "identificador-voz-1",
+    "María": "identificador-voz-2"
   },
-  {
-    "type": "narration",
-    "speaker": "Narrator",
-    "text": "preguntó María."
+  "generated_at": "2026-10-05T18:00:00+00:00",
+  "source": "C:\\libros\\mi_libro.docx",
+  "outputs": {
+    "chapters": ["01_prologo.wav", "02_capitulo_1.wav"],
+    "full_audiobook": "full_audiobook.wav"
   }
-]
+}
 ```
 
-## Identificación de personajes
+## Detección de capítulos
 
-### Resolución mediante reglas
+En DOCX se priorizan los estilos `Heading 1` / `Título 1` y niveles equivalentes. En TXT y PDF se reconocen, entre otros:
 
-Las reglas examinan la atribución narrativa inmediatamente posterior al diálogo. Reconocen verbos frecuentes como `dijo`, `respondió`, `preguntó`, `gritó`, `susurró`, `exclamó`, `contestó`, `añadió`, `replicó` y `murmuró` cuando van seguidos de un nombre propio.
+- `Capítulo 1`, `Capítulo IV`, `Chapter One`;
+- `Prólogo` y `Epílogo`;
+- `1. Introducción` y `3 - Una promesa`;
+- `Episodio 42`, `Parte 2`, `Volume 3`;
+- encabezados Markdown como `# Chapter 12`;
+- títulos breves en mayúsculas.
 
-Esta estrategia es rápida, determinista y no consume API.
+Si no aparece ninguna división fiable, se crea un único capítulo llamado `Full document`. Las heurísticas son intencionadamente simples: pueden necesitar ajustes para obras con convenciones poco habituales.
 
-### Resolución mediante Gemini
+## Tratamiento por formato
 
-Si las reglas no encuentran una atribución fiable, el adaptador de Gemini recibe:
+### TXT
 
-- el diálogo actual;
-- hasta dos segmentos anteriores;
-- hasta dos segmentos posteriores;
-- los personajes conocidos hasta ese momento.
+Se espera UTF-8. Se conservan saltos de párrafo y líneas de diálogo.
 
-Gemini debe devolver un objeto con `speaker` y `confidence`. La aplicación valida el JSON, el nombre y que la confianza esté entre 0 y 1. Ante una respuesta inválida, un error de red o falta de clave, el personaje queda como `Unknown` y la ejecución continúa.
+### PDF
 
-El resto de la aplicación depende únicamente del contrato `SpeakerResolver`; el SDK de Google está encapsulado en `GeminiSpeakerResolver`, por lo que otro proveedor puede añadirse sin cambiar la lógica de identificación.
+Se usa extracción nativa con `pypdf`. Se eliminan números de página evidentes y encabezados o pies repetidos. V0.4 no aplica OCR; un PDF formado solo por imágenes produce un error informativo.
 
-## Consistencia de nombres
+> **PDF escaneado o basado en imágenes: no soportado todavía.** OCR queda fuera de V0.4 y podrá añadirse en una versión futura si se considera necesario.
 
-Los nombres se comparan ignorando mayúsculas, espacios redundantes y tildes. Por ejemplo, `María`, `MARÍA` y `Maria` comparten la misma identidad. La primera grafía encontrada se conserva para mostrarla al usuario.
+### DOCX
 
-`Unknown` no se incorpora a la lista de personajes detectados.
+Se usa `python-docx`. Se leen párrafos, título del documento y estilos de encabezado. En V0.4 se ignoran imágenes, tablas, notas al pie avanzadas y otros elementos no narrativos.
 
-## Asignación de voces
+## Probar con los ejemplos locales
 
-`voice_assignment.py` asigna voces por orden de primera aparición:
+El repositorio incluye fixtures pequeños sin descargas externas:
 
-```text
-Narrator → primera voz
-primer personaje → segunda voz
-segundo personaje → tercera voz
+```powershell
+smart-audiobook tests/fixtures/sample_book.txt --analyze-only --no-llm
+smart-audiobook tests/fixtures/sample_book.pdf --analyze-only --no-llm
+smart-audiobook tests/fixtures/sample_book.docx --analyze-only --no-llm
 ```
 
-Si hay más personajes que voces instaladas, las voces se reutilizan de forma cíclica. La asignación está separada del TTS para permitir selección manual en una versión futura.
+Para realizar una generación completa:
+
+```powershell
+smart-audiobook tests/fixtures/sample_book.txt --no-llm
+```
+
+Los binarios PDF y DOCX se pueden reconstruir con `tests/fixtures/build_fixtures.py`; ese script de desarrollo usa `reportlab`, que no es una dependencia de ejecución de Smart Audiobook.
 
 ## Arquitectura
 
 ```text
-AppAudiobook/
-├── examples/
-│   └── example.txt
-├── output/                              # Audios finales, ignorados por Git
-├── src/smart_audiobook/
-│   ├── audio.py                         # Orquestación y combinación WAV
-│   ├── characters.py                    # Normalización y registro de nombres
-│   ├── cli.py                           # Interfaz de línea de comandos
-│   ├── gemini_resolver.py               # Adaptador aislado de Gemini API
-│   ├── models.py                        # Modelos del dominio
-│   ├── segmenter.py                     # Narración frente a diálogo
-│   ├── speaker_identification.py        # Reglas, fallback y caché
-│   ├── speaker_resolvers.py             # Contrato y reglas deterministas
-│   ├── text_reader.py                   # Lectura y validación del TXT
-│   ├── tts.py                           # Síntesis con voces locales
-│   └── voice_assignment.py              # Personaje → voz
-├── tests/
-├── .env.example
-├── .gitignore
-├── pyproject.toml
-└── README.md
+src/smart_audiobook/
+├── audio.py                  # Síntesis ordenada y combinación WAV
+├── book_processor.py         # Orquestación de libro, capítulos y metadatos
+├── chapter_detection.py      # Heurísticas y estilos DOCX
+├── characters.py             # Registro canónico de personajes
+├── cli.py                    # Interfaz de línea de comandos
+├── document_loaders.py       # Adaptadores TXT, PDF y DOCX
+├── gemini_resolver.py        # Adaptador aislado de Gemini
+├── models.py                 # Document, Chapter y modelos de diálogo
+├── output_files.py           # Nombres seguros y metadata.json
+├── segmenter.py              # Narración frente a diálogo
+├── speaker_identification.py # Reglas, fallback y caché
+├── speaker_resolvers.py      # Contrato y reglas deterministas
+├── text_normalizer.py        # Normalización explícita
+├── tts.py                    # Motor de voz local
+└── voice_assignment.py       # Personaje → voz
 ```
+
+Los cargadores dependen de `DocumentLoader`, y la integración LLM depende de `SpeakerResolver`. Esta separación permite añadir formatos o sustituir Gemini sin modificar la lógica central.
 
 ## Tests
 
@@ -216,18 +216,15 @@ AppAudiobook/
 python -m unittest discover -s tests -v
 ```
 
-Las llamadas a Gemini están simuladas en los tests; la suite nunca depende de una API externa ni consume cuota.
+La suite cubre los tres formatos, detección de capítulos, documento sin capítulos, archivos vacíos o corruptos, extensión no soportada, PDF protegido, PDF sin texto, páginas inusuales, normalización, nombres seguros, pipeline de salida y compatibilidad con las funciones anteriores. Gemini y el TTS se simulan cuando corresponde; las pruebas automatizadas no consumen API.
 
 ## Limitaciones conocidas
 
-- Las reglas solo reconocen un conjunto pequeño de verbos de habla en español.
-- Las atribuciones indirectas o alejadas suelen necesitar Gemini.
-- Gemini puede inferir un personaje incorrecto incluso con una respuesta válida.
-- La ventana de contexto es deliberadamente pequeña y no sirve para libros enormes.
-- La caché solo dura durante la ejecución actual.
-- No se detectan diálogos delimitados únicamente por comillas.
-- No existe edición manual de personajes ni selección manual de voces.
-- El nivel gratuito de Gemini tiene cuotas y disponibilidad definidas por Google.
-
-La V0.3 no incluye PDF, DOCX, frontend, biblioteca, usuarios, autenticación, base de datos, Docker ni procesamiento paralelo avanzado.
-
+- No hay OCR para PDF escaneados.
+- La extracción PDF depende de cómo esté construido el documento y puede alterar el orden de maquetaciones complejas.
+- Las tablas e imágenes DOCX no se narran.
+- Las heurísticas pueden detectar de más o de menos en novelas con encabezados no convencionales.
+- Solo se detectan diálogos con raya larga; las comillas aún no se tratan como diálogo.
+- Las reglas de hablante cubren un conjunto limitado de verbos de habla en español.
+- Si faltan voces, se reutilizan de forma cíclica.
+- La salida de audio de V0.4 es WAV, no MP3.
