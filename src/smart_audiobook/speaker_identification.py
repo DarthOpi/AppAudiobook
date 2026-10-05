@@ -43,7 +43,12 @@ class SpeakerIdentificationService:
 
         for index, segment in enumerate(resolved_segments):
             if segment.type == "narration":
-                resolved_segments[index] = replace(segment, speaker=NARRATOR)
+                resolved_segments[index] = replace(
+                    segment,
+                    speaker=NARRATOR,
+                    confidence=1.0,
+                    resolution_method="system",
+                )
                 continue
 
             context = self._build_context(resolved_segments, index, registry)
@@ -56,7 +61,12 @@ class SpeakerIdentificationService:
                 if resolution is not None
                 else UNKNOWN_SPEAKER
             )
-            resolved_segments[index] = replace(segment, speaker=speaker)
+            resolved_segments[index] = replace(
+                segment,
+                speaker=speaker,
+                confidence=resolution.confidence if resolution else None,
+                resolution_method=resolution.source if resolution else "unknown",
+            )
 
         return SpeakerAnalysis(
             segments=tuple(resolved_segments),

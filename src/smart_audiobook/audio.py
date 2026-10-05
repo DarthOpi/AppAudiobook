@@ -6,11 +6,8 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from smart_audiobook.models import TextSegment
-from smart_audiobook.tts import (
-    SpeechGenerationError,
-    get_available_voice_ids,
-    synthesize_to_wav,
-)
+from smart_audiobook.tts import SpeechGenerationError
+from smart_audiobook.tts_providers import LocalTTSProvider, TTSProvider
 from smart_audiobook.voice_assignment import assign_voices
 
 
@@ -18,13 +15,15 @@ def generate_audiobook(
     segments: Sequence[TextSegment],
     output_path: Path,
     voices_by_speaker: Mapping[str, str] | None = None,
+    tts_provider: TTSProvider | None = None,
 ) -> Path:
     """Synthesize ordered segments with separate narration and dialogue voices."""
     if not segments:
         raise SpeechGenerationError("No hay segmentos de texto para convertir.")
 
+    provider = tts_provider or LocalTTSProvider()
     if voices_by_speaker is None:
-        voice_ids = get_available_voice_ids()
+        voice_ids = [voice.id for voice in provider.list_voices()]
         if not voice_ids:
             raise SpeechGenerationError("No se encontraron voces instaladas.")
         voices_by_speaker = assign_voices(segments, voice_ids)
@@ -35,10 +34,10 @@ def generate_audiobook(
 
         for index, segment in enumerate(segments):
             segment_path = temporary_directory / f"segment-{index:04d}.wav"
-            synthesize_to_wav(
+            provider.synthesize(
                 segment.text,
                 segment_path,
-                voice_id=voices_by_speaker[segment.speaker],
+                voices_by_speaker[segment.speaker],
             )
             segment_files.append(segment_path)
 

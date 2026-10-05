@@ -1,6 +1,6 @@
 """End-to-end orchestration for a multi-chapter audiobook."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +11,7 @@ from smart_audiobook.output_files import safe_filename, write_metadata
 from smart_audiobook.segmenter import segment_text
 from smart_audiobook.speaker_identification import SpeakerIdentificationService
 from smart_audiobook.tts import SpeechGenerationError, get_available_voice_ids
+from smart_audiobook.tts_providers import LocalTTSProvider, TTSProvider
 from smart_audiobook.voice_assignment import assign_voices
 
 
@@ -50,10 +51,22 @@ def analyze_book(
     """Segment and identify speakers while sharing characters across chapters."""
     registry = CharacterRegistry()
     analyzed_chapters: list[AnalyzedChapter] = []
+    global_order = 0
     for chapter in document.chapters:
         analysis = speaker_service.identify(segment_text(chapter.text), registry=registry)
+        indexed_segments = []
+        for segment in analysis.segments:
+            global_order += 1
+            indexed_segments.append(
+                replace(
+                    segment,
+                    id=f"seg_{global_order:06d}",
+                    chapter=chapter.number,
+                    order=global_order,
+                )
+            )
         analyzed_chapters.append(
-            AnalyzedChapter(chapter.number, chapter.title, analysis.segments)
+            AnalyzedChapter(chapter.number, chapter.title, tuple(indexed_segments))
         )
     return BookAnalysis(document, tuple(analyzed_chapters), registry.characters)
 
@@ -62,6 +75,8 @@ def generate_book(
     analysis: BookAnalysis,
     output_root: Path,
     full_audiobook_path: Path | None = None,
+    voices_by_speaker: dict[str, str] | None = None,
+    tts_provider: TTSProvider | None = None,
 ) -> BookOutput:
     """Generate chapter WAV files, the combined book and its metadata."""
     output_directory = output_root / safe_filename(analysis.document.title, "book")
@@ -72,10 +87,26 @@ def generate_book(
     )
     if not all_segments:
         raise SpeechGenerationError("El documento no contiene texto para convertir.")
-    voice_ids = get_available_voice_ids()
+    provider = tts_provider or LocalTTSProvider()
+    voice_ids = (
+        [voice.id for voice in provider.list_voices()]
+        if tts_provider is not None
+        else get_available_voice_ids()
+    )
     if not voice_ids:
         raise SpeechGenerationError("No se encontraron voces instaladas.")
-    voices_by_speaker = assign_voices(all_segments, voice_ids)
+    if voices_by_speaker is None:
+        voices_by_speaker = assign_voices(all_segments, voice_ids)
+
+    used_speakers = {segment.speaker for segment in all_segments}
+    missing_speakers = sorted(used_speakers.difference(voices_by_speaker))
+    invalid_voices = sorted(set(voices_by_speaker.values()).difference(voice_ids))
+    if missing_speakers:
+        raise SpeechGenerationError(
+            "Falta una voz para: " + ", ".join(missing_speakers)
+        )
+    if invalid_voices:
+        raise SpeechGenerationError("Hay voces seleccionadas que ya no están disponibles.")
 
     chapter_files: list[Path] = []
     for chapter in analysis.chapters:
@@ -85,6 +116,7 @@ def generate_book(
             chapter.segments,
             chapter_path,
             voices_by_speaker=voices_by_speaker,
+            tts_provider=provider,
         )
         chapter_files.append(chapter_path)
 
@@ -99,7 +131,7 @@ def generate_book(
             "detected_characters": list(analysis.characters),
             "voice_assignments": dict(voices_by_speaker),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "source": str(analysis.document.source_path),
+            "source": analysis.document.source_path.name,
             "outputs": {
                 "chapters": [path.name for path in chapter_files],
                 "full_audiobook": full_audiobook.name,

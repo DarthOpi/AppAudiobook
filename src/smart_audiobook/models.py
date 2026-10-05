@@ -2,10 +2,10 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 SegmentType = Literal["narration", "dialogue"]
-ResolutionSource = Literal["rule", "llm", "unknown"]
+ResolutionSource = Literal["rule", "llm", "manual", "system", "unknown"]
 DocumentFormat = Literal["txt", "pdf", "docx"]
 
 NARRATOR = "Narrator"
@@ -48,10 +48,24 @@ class TextSegment:
     type: SegmentType
     text: str
     speaker: str
+    id: str = ""
+    chapter: int = 0
+    order: int = 0
+    confidence: float | None = None
+    resolution_method: ResolutionSource | None = None
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the segment."""
-        return {"type": self.type, "speaker": self.speaker, "text": self.text}
+        return {
+            "id": self.id,
+            "chapter": self.chapter,
+            "order": self.order,
+            "type": self.type,
+            "text": self.text,
+            "speaker": self.speaker,
+            "confidence": self.confidence,
+            "resolution_method": self.resolution_method,
+        }
 
 
 @dataclass(frozen=True, slots=True)

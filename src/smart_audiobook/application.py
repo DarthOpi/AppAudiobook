@@ -15,6 +15,7 @@ from smart_audiobook.document_loaders import load_document
 from smart_audiobook.gemini_resolver import build_gemini_resolver_from_environment
 from smart_audiobook.speaker_identification import SpeakerIdentificationService
 from smart_audiobook.speaker_resolvers import RuleBasedSpeakerResolver
+from smart_audiobook.tts_providers import TTSProvider
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +84,24 @@ class AudiobookApplicationService:
             "Audio generation finished: chapters=%d",
             len(output.chapter_files),
         )
+        return ProcessingResult(analysis=analysis, output=output)
+
+    def generate(
+        self,
+        analysis: BookAnalysis,
+        output_root: Path,
+        voices_by_speaker: dict[str, str] | None = None,
+        tts_provider: TTSProvider | None = None,
+    ) -> ProcessingResult:
+        """Generate audio from an already reviewed analysis without re-analysis."""
+        LOGGER.info("Audio generation started: %s", analysis.document.title)
+        output = generate_book(
+            analysis,
+            output_root,
+            voices_by_speaker=voices_by_speaker,
+            tts_provider=tts_provider,
+        )
+        LOGGER.info("Audio generation finished: chapters=%d", len(output.chapter_files))
         return ProcessingResult(analysis=analysis, output=output)
 
 
