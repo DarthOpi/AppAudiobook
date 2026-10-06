@@ -5,7 +5,7 @@ from zipfile import BadZipFile, ZipFile, is_zipfile
 
 from smart_audiobook.output_files import safe_filename
 
-ALLOWED_EXTENSIONS = frozenset({".txt", ".pdf", ".docx"})
+ALLOWED_EXTENSIONS = frozenset({".txt", ".pdf", ".docx", ".epub"})
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED_SIZE = 100 * 1024 * 1024
 
@@ -25,7 +25,7 @@ def sanitize_upload_name(original_name: str) -> str:
     extension = source.suffix.casefold()
     if extension not in ALLOWED_EXTENSIONS:
         raise UploadValidationError(
-            "Formato no soportado. Utiliza un archivo TXT, PDF o DOCX."
+            "Formato no soportado. Utiliza un archivo TXT, PDF o DOCX, o EPUB."
         )
     return f"{safe_filename(source.stem, 'document')}{extension}"
 
@@ -56,6 +56,14 @@ def validate_uploaded_content(path: Path) -> None:
 
     if extension == ".docx":
         _validate_docx_package(path)
+        return
+
+    if extension == ".epub":
+        from smart_audiobook.epub_importer import validate_epub
+        try:
+            validate_epub(path)
+        except ValueError as error:
+            raise UploadValidationError(str(error)) from error
         return
 
     raise UploadValidationError("Formato no soportado.")

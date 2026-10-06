@@ -24,6 +24,8 @@ _SPECIAL_PATTERN = re.compile(r"^(?:pr[oó]logo|ep[ií]logo)$", re.IGNORECASE)
 
 def detect_chapters(document: Document) -> Document:
     """Return a document with chapters inferred from styles or heading text."""
+    if document.chapters:
+        return document
     blocks = document.blocks or tuple(
         DocumentBlock(text=line)
         for line in document.full_text.splitlines()
@@ -36,14 +38,14 @@ def detect_chapters(document: Document) -> Document:
     ]
 
     if not heading_indexes:
-        chapter = Chapter(number=1, title="Full document", text=document.full_text)
+        chapter = Chapter(number=1, title="Full document", text=document.full_text, blocks=blocks)
         return replace(document, chapters=(chapter,))
 
     chapters: list[Chapter] = []
     first_heading = heading_indexes[0]
     preamble = _join_blocks(blocks[:first_heading])
     if preamble:
-        chapters.append(Chapter(number=1, title="Introduction", text=preamble))
+        chapters.append(Chapter(number=1, title="Introduction", text=preamble, blocks=blocks[:first_heading]))
 
     for position, heading_index in enumerate(heading_indexes):
         end_index = (
@@ -55,7 +57,7 @@ def detect_chapters(document: Document) -> Document:
         body = _join_blocks(blocks[heading_index + 1 : end_index])
         spoken_text = normalize_text(f"{heading}\n\n{body}" if body else heading)
         chapters.append(
-            Chapter(number=len(chapters) + 1, title=heading, text=spoken_text)
+            Chapter(number=len(chapters) + 1, title=heading, text=spoken_text, blocks=blocks[heading_index:end_index])
         )
 
     return replace(document, chapters=tuple(chapters))

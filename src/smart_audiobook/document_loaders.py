@@ -1,6 +1,8 @@
 """Document loaders for the supported input formats."""
 
 import re
+import hashlib
+from dataclasses import replace
 from abc import ABC, abstractmethod
 from collections import Counter
 from pathlib import Path
@@ -34,6 +36,15 @@ class TxtDocumentLoader(DocumentLoader):
         except OSError as error:
             raise DocumentLoadError(f"No se pudo leer el TXT: {error}") from error
         return _build_document(path, "txt", text)
+
+
+class EpubDocumentLoader(DocumentLoader):
+    def load(self, path: Path) -> Document:
+        from smart_audiobook.epub_importer import load_epub
+        try:
+            return load_epub(path)
+        except Exception as error:
+            raise DocumentLoadError(f"No se pudo importar el EPUB: {error}") from error
 
 
 class PdfDocumentLoader(DocumentLoader):
@@ -74,6 +85,8 @@ class PdfDocumentLoader(DocumentLoader):
             "pdf",
             _clean_pdf_pages(pages),
             title=metadata_title,
+            author=(getattr(reader.metadata, "author", None) or None),
+            source_pages=pages,
         )
 
 
@@ -99,6 +112,9 @@ class DocxDocumentLoader(DocumentLoader):
                     DocumentBlock(
                         text=text,
                         heading_level=_heading_level(style_name),
+                        emphasis=tuple(sorted({kind for run in paragraph.runs for kind, enabled in
+                            (("italic", run.italic), ("bold", run.bold)) if enabled})),
+                        source_reference=f"docx:paragraph-{len(blocks)+1}",
                     )
                 )
         except (PackageNotFoundError, BadZipFile, OSError, ValueError) as error:
@@ -115,14 +131,16 @@ class DocxDocumentLoader(DocumentLoader):
             format="docx",
             full_text=full_text,
             blocks=tuple(blocks),
+            author=word_document.core_properties.author or None,
         )
-        return detect_chapters(document)
+        return _enrich_chapters(detect_chapters(document))
 
 
 _LOADERS: dict[str, DocumentLoader] = {
     ".txt": TxtDocumentLoader(),
     ".pdf": PdfDocumentLoader(),
     ".docx": DocxDocumentLoader(),
+    ".epub": EpubDocumentLoader(),
 }
 
 
@@ -145,6 +163,8 @@ def _build_document(
     document_format: DocumentFormat,
     text: str,
     title: str = "",
+    author: str | None = None,
+    source_pages: list[str] | None = None,
 ) -> Document:
     normalized = normalize_text(text)
     if not normalized:
@@ -154,15 +174,47 @@ def _build_document(
         for line in normalized.splitlines()
         if line.strip()
     )
-    return detect_chapters(
+    if source_pages is not None:
+        blocks = tuple(DocumentBlock(text=normalize_text(line), source_reference=f"pdf:page-{number}")
+            for number, page in enumerate(_pdf_page_texts(source_pages), start=1)
+            for line in page.splitlines() if normalize_text(line))
+    document = detect_chapters(
         Document(
             title=normalize_text(title) or path.stem,
             source_path=path.resolve(),
             format=document_format,
             full_text=normalized,
             blocks=blocks,
+            author=author,
         )
     )
+    return _enrich_chapters(document, source_pages)
+
+
+def _enrich_chapters(document: Document, pages: list[str] | None = None) -> Document:
+    """Attach stable identities and conservative source references to old adapters."""
+    chapters = []
+    cursor = 0
+    for chapter in document.chapters:
+        start = document.full_text.find(chapter.text, cursor)
+        start = max(cursor, start)
+        end = start + len(chapter.text)
+        reference = f"txt:characters-{start}-{end}"
+        if pages is not None:
+            hits = sorted({int(b.source_reference.rsplit("-", 1)[-1]) for b in chapter.blocks
+                           if b.source_reference and b.source_reference.startswith("pdf:page-")})
+            reference = f"pdf:pages-{min(hits)}-{max(hits)}" if hits else "pdf:pages-unknown"
+        blocks = chapter.blocks or tuple(DocumentBlock(line) for line in chapter.text.splitlines() if line.strip())
+        if document.format == "docx":
+            reference = next((b.source_reference for b in blocks if b.source_reference), f"docx:section-{chapter.number}")
+        identity = hashlib.sha256(f"{document.format}:{chapter.number}:{reference}".encode()).hexdigest()[:16]
+        chapters.append(replace(chapter, id=f"ch_{identity}", source_reference=reference,
+            raw_text="\n\n".join(pages[min(hits)-1:max(hits)]) if pages is not None and hits else chapter.text,
+            blocks=blocks, word_count=len(chapter.text.split()),
+            cleaning_notes=("PDF: limpieza de números y encabezados/pies repetidos solo en bordes de página; el texto original muestra las páginas de origen.",)
+                if pages is not None else ()))
+        cursor = end
+    return replace(document, chapters=tuple(chapters))
 
 
 def _heading_level(style_name: str) -> int | None:
@@ -172,6 +224,10 @@ def _heading_level(style_name: str) -> int | None:
 
 def _clean_pdf_pages(pages: list[str]) -> str:
     """Remove obvious page numbers and repeated first/last lines."""
+    return normalize_text("\n\n".join(_pdf_page_texts(pages)))
+
+
+def _pdf_page_texts(pages: list[str]) -> list[str]:
     page_lines = [
         [line.strip() for line in page.splitlines() if line.strip()]
         for page in pages
@@ -189,18 +245,9 @@ def _clean_pdf_pages(pages: list[str]) -> str:
     }
     cleaned_pages: list[str] = []
     for lines in page_lines:
-        useful_lines = [
-            line
-            for line in lines
-            if line not in repeated
-            and not re.fullmatch(r"(?:p[aá]gina\s+)?\d+", line, re.I)
-        ]
+        useful_lines = [line for index, line in enumerate(lines)
+            if not (index in {0, len(lines)-1} and (line in repeated
+                or re.fullmatch(r"(?:p[aá]gina\s+)?\d+", line, re.I)))]
         cleaned_pages.append("\n".join(useful_lines))
-    extracted = "\n\n".join(cleaned_pages)
-    extracted = re.sub(
-        r"(?<=[a-záéíóúüñ])-\n(?=[a-záéíóúüñ])",
-        "",
-        extracted,
-        flags=re.IGNORECASE,
-    )
-    return normalize_text(extracted)
+    return [normalize_text(re.sub(r"(?<=[a-záéíóúüñ])-\n(?=[a-záéíóúüñ])", "", page,
+            flags=re.IGNORECASE)) for page in cleaned_pages]
