@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-audiobook"
-version = "0.7.0"
+version = "0.8.0"
 description = "Convierte documentos en audiolibros desde CLI o interfaz web."
 readme = "README.md"
 requires-python = ">=3.10"

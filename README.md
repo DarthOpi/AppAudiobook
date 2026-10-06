@@ -1,8 +1,8 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.7** incorpora TTS neuronal local con Piper, caché de audio y generación reanudable, manteniendo la revisión web y la CLI.
+Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.8** añade memoria de personajes por libro, aliases temporales, resolución contextual y revisión por prioridad sobre el TTS local reanudable de V0.7.
 
-## Qué incluye V0.7
+## Qué incluye V0.8
 
 - Carga automática de `.txt`, `.pdf` y `.docx` mediante una interfaz común.
 - Modelo interno independiente del formato de origen.
@@ -286,6 +286,87 @@ smart-audiobook tests/fixtures/sample_book.txt --no-llm
 ```
 
 Los binarios PDF y DOCX se pueden reconstruir con `tests/fixtures/build_fixtures.py`; ese script de desarrollo usa `reportlab`, que no es una dependencia de ejecución de Smart Audiobook.
+
+## Character Intelligence
+
+Cada libro mantiene un `CharacterRegistry` dentro de `analysis.json`. Sus perfiles tienen ID estable, nombre canónico, aliases con `known_from_chapter`, importancia, atributos opcionales, estadísticas, actividad reciente, voz y procedencia manual. El registro centraliza búsqueda, normalización, fusión, estadísticas y sugerencias. Género y edad permanecen desconocidos si no existe información; V0.8 no los deduce.
+
+Ejemplo conceptual:
+
+```json
+{
+  "id": "char_000002",
+  "canonical_name": "Sunny",
+  "aliases": [{"name": "Sunless", "known_from_chapter": 20, "source": "manual"}],
+  "importance": "major",
+  "gender": null,
+  "dialogue_count": 35,
+  "voice_strategy": "dedicated"
+}
+```
+
+`Sunless` identifica a Sunny desde el capítulo 20. Al reanalizar el capítulo 5, ese alias no está disponible. Los perfiles descubiertos en capítulos futuros tampoco entran en los candidatos. El contexto posterior se limita al mismo capítulo y no reutiliza etiquetas de speaker resueltas en el futuro. Las descripciones enriquecidas registran hasta qué capítulo se conocían y no forman parte del prompt de atribución.
+
+La importancia usa heurísticas transparentes: `major` a partir de 30 diálogos, o 10 diálogos repartidos en al menos 5 capítulos; `supporting` desde 5 diálogos, 3 capítulos o 20 menciones; `minor` con alguna aparición; `unknown` cuando falta evidencia o el perfil es provisional. Los recuentos se reconstruyen sin duplicarlos en cada guardado. La actividad conserva las últimas 64 observaciones por personaje; la selección usa una ventana reciente de 12 segmentos por defecto.
+
+Resolución:
+
+```text
+Document → Segmentation → Character Registry → Candidate Generator
+                                                  ↓
+                      Explicit/Syntactic Rules → Conversation Resolver
+                                                  ↓
+                                Candidate scoring / exact known-name label
+                                                  ↓
+                                         LLM if still ambiguous
+                                                  ↓
+                                     Confidence Policy → Review → Speaker
+
+Character Registry
+├── Profiles and stable IDs
+├── Temporal aliases and knowledge
+├── Statistics and importance
+├── Recent activity
+└── Voice assignments and manual provenance
+```
+
+Los candidatos se puntúan por menciones cercanas, aliases, speakers anteriores y actividad; se envían como máximo 6. Una mención aislada no basta para asignar speaker automáticamente. La alternancia A-B-A solo se acepta en un intercambio corto entre dos participantes, sin señales de cambio de escena. Una atribución explícita o etiqueta de personaje evita la consulta a Gemini.
+
+Umbrales en `.env`:
+
+```dotenv
+SPEAKER_ACCEPT_CONFIDENCE=0.85
+SPEAKER_REVIEW_CONFIDENCE=0.60
+SPEAKER_CANDIDATE_LIMIT=6
+CHARACTER_ACTIVE_WINDOW=12
+SPEAKER_PROMPT_VERSION=v2
+```
+
+Con confianza >= 0.85 se acepta la resolución; entre 0.60 y 0.85 se acepta y marca revisión; por debajo queda `Unknown`. Un nuevo nombre sugerido por Gemini exige evidencia textual, permanece `pending` y no recibe diálogos ni voz definitiva hasta confirmarlo. La respuesta JSON se valida y no puede elegir un personaje fuera de los candidatos sin declarar que es nuevo.
+
+La caché LLM vive en el proyecto. Su clave incluye diálogo, contexto compacto, candidatos, actividad, capítulo, modelo/proveedor y versión de prompt. Los hits y las decisiones locales incrementan `llm_calls_saved`. Las solicitudes siguen siendo individuales: en V0.8 se prioriza la continuidad secuencial y una validación simple sobre batching, que podría propagar errores entre diálogos.
+
+En la web, `Character Registry` muestra aliases, importancia, estadísticas, voz y primeras/últimas apariciones. Añade o elimina aliases indicando desde cuándo se conocen. Para mover un nombre detectado a alias, fusiona el personaje de origen en el destino y elige el capítulo de conocimiento. El destino conserva su voz manual; si no la tiene, se conserva una voz manual del origen. Renombrar cambia el nombre canónico y conserva el anterior como alias. Las sugerencias de duplicados por similitud/títulos o evidencia de «conocido como» requieren confirmación; no relacionamos nombres diferentes sin evidencia.
+
+`Review Issues` filtra Unknown, baja confianza, candidatos nuevos y duplicados. La lista prioriza los casos dudosos. Reanalizar permite seleccionar segmentos o actuar sobre Unknown/baja confianza: toda resolución `manual` se conserva incluso si se selecciona expresamente. Las fusiones confirmadas son correcciones explícitas del usuario y actualizan los diálogos. Los hashes TTS cambian cuando cambian las voces usadas, sin eliminar audios reutilizables.
+
+Las voces se asignan de forma determinista, reservando voces disponibles para narrador y personajes major/supporting; los menores comparten el resto del catálogo. Solo se utiliza metadata real de género cuando existe una coincidencia; si falta, la selección es neutral. Una elección manual nunca se sobrescribe. No se deducen edades ni estilos vocales.
+
+`Enriquecer con Gemini` es una acción explícita y opcional: utiliza hasta ocho fragmentos de evidencia anteriores al capítulo indicado, requiere al menos tres, y propone una descripción y rasgos. No ejecuta llamadas continuas, crea aliases automáticamente ni usa conocimiento externo del libro.
+
+Migración: los estados anteriores sin `schema_version` se cargan como versión 1; se reconstruyen perfiles/estadísticas y se preservan voces existentes como manuales por precaución. El siguiente guardado escribe `schema_version: 2` atómicamente. No se reanaliza el documento ni se pierden salidas existentes. Las versiones futuras desconocidas se rechazan con un error controlado.
+
+Prueba desde CLI:
+
+```powershell
+smart-audiobook examples/character_intelligence.txt --analyze-only --show-characters --character-stats --no-llm
+python examples/verify_character_intelligence.py
+smart-audiobook examples/character_intelligence.txt --project-id UUID --reanalyze-unresolved --no-llm
+```
+
+La tercera orden abre un proyecto existente de `work/`; sustituye UUID por su identificador. El archivo posicional se conserva por compatibilidad y no se vuelve a cargar al abrir un proyecto. Quita `--no-llm` para habilitar Gemini si existe una clave. La prueba reproducible usa respuestas LLM de fixture, sin red ni generación de audio. En la web, sube `examples/character_intelligence.txt`, confirma los candidatos, revisa Sunny/Sunless y Sir Gilead/Gilead y comprueba los aliases al reanalizar. `metadata.json` incluye perfiles y métricas de resolución, revisión, importancia y llamadas ahorradas.
+
+Limitaciones: heurísticas orientadas a diálogos españoles con raya, estadísticas de menciones solo para nombres ya conocidos, detección de aliases limitada a patrones explícitos y gestión manual, ventana por capítulo, sin batching ni recuperación externa de conocimiento. El registro es específico del libro y se persiste en JSON; no hay base de datos global.
 
 ## Local TTS
 
