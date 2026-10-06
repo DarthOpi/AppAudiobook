@@ -1,8 +1,8 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.6** incorpora una fase web de revisión de personajes y voces antes del TTS, sin abandonar el modo automático de la CLI.
+Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.7** incorpora TTS neuronal local con Piper, caché de audio y generación reanudable, manteniendo la revisión web y la CLI.
 
-## Qué incluye V0.6
+## Qué incluye V0.7
 
 - Carga automática de `.txt`, `.pdf` y `.docx` mediante una interfaz común.
 - Modelo interno independiente del formato de origen.
@@ -24,6 +24,10 @@ Smart Audiobook es un proyecto incremental para convertir novelas y novelas web 
 - Página de resultado con capítulos, personajes, voces y estadísticas.
 - Reproducción HTML5 y descarga controlada de cada WAV.
 - Logging básico y eliminación inmediata de los uploads temporales.
+- Piper local opcional, con catálogo multi-modelo y soporte multi-speaker.
+- Caché persistente por contenido, voz, proveedor, modelo y ajustes.
+- Chunking por frases, pausas configurables y concatenación WAV por streaming.
+- Estado por capítulo, reanudación tras fallos y progreso web mediante polling.
 
 No incluye OCR, EPUB, descarga de novelas web, frontend separado, base de datos, autenticación, Docker, biblioteca permanente ni procesamiento asíncrono avanzado.
 
@@ -53,10 +57,10 @@ El formato se detecta por la extensión. Desde `Document` en adelante, el pipeli
 ## Requisitos
 
 - Python 3.10 o posterior.
-- Una o más voces instaladas en el sistema operativo.
+- Para Piper: uno o más modelos de voz compatibles bajo `voices/`.
 - Opcional: `GEMINI_API_KEY` para resolver diálogos ambiguos.
 
-La síntesis usa `pyttsx3` y se ejecuta localmente. Gemini solo recibe contexto limitado de diálogos que las reglas no pueden resolver.
+Piper es el proveedor recomendado para novelas. El proveedor `system` de V0.6, basado en `pyttsx3`, sigue disponible como compatibilidad. Gemini solo recibe contexto limitado de diálogos que las reglas no pueden resolver.
 
 ## Instalación
 
@@ -71,6 +75,12 @@ Para instalar la interfaz web:
 
 ```powershell
 python -m pip install -e ".[web]"
+```
+
+Para instalar Piper junto con la web:
+
+```powershell
+python -m pip install -e ".[web,local-tts]"
 ```
 
 Para desarrollo y tests web:
@@ -152,7 +162,7 @@ La lista se pagina de 50 en 50 y puede filtrarse por personaje o capítulo. Los 
 
 La barra lateral muestra las voces que ofrece el proveedor TTS local, incluyendo únicamente la metadata realmente disponible. Cada personaje puede elegir una voz distinta. **Preview** genera una frase corta en WAV y la conserva en caché por `processing_id` y voz.
 
-La interfaz depende de `TTSProvider`, no de `pyttsx3`. V0.6 implementa únicamente `LocalTTSProvider`; otros proveedores podrán añadirse sin cambiar la lógica de revisión.
+La interfaz depende de `TTSProvider`, no de un SDK concreto. V0.7 ofrece `PiperTTSProvider` y conserva `SystemTTSProvider`; un proveedor nuevo puede incorporarse sin cambiar la revisión ni el procesador del libro.
 
 ### Generar el audio definitivo
 
@@ -277,12 +287,59 @@ smart-audiobook tests/fixtures/sample_book.txt --no-llm
 
 Los binarios PDF y DOCX se pueden reconstruir con `tests/fixtures/build_fixtures.py`; ese script de desarrollo usa `reportlab`, que no es una dependencia de ejecución de Smart Audiobook.
 
+## Local TTS
+
+V0.7 usa [Piper](https://github.com/OHF-Voice/piper1-gpl) como motor neuronal local recomendado: funciona sin API externa, dispone de modelos en español, produce WAV PCM y puede ejecutarse en CPU o GPU. Piper se carga de forma diferida; instalar o ejecutar los tests básicos no descarga modelos ni carga redes neuronales.
+
+Instala el extra y descarga voces desde el catálogo oficial de Piper:
+
+```powershell
+python -m pip install -e ".[web,local-tts]"
+python -m piper.download_voices --data-dir voices es_ES-sharvard-medium
+```
+
+El descargador oficial guarda el `.onnx` y su `.onnx.json`; ambos son necesarios. Puedes repetir el comando para añadir modelos españoles. Smart Audiobook descubre todos los modelos de `voices/`, incluidos sus speakers internos. Revisa la ficha y licencia de cada voz antes de usarla o distribuir audio. El repositorio no incluye modelos, voces clonadas ni audio de terceros.
+
+Configuración en `.env`:
+
+```dotenv
+TTS_PROVIDER=piper
+PIPER_VOICES_DIR=voices
+PIPER_DEVICE=auto
+TTS_CHUNK_MAX_CHARS=400
+TTS_SEGMENT_PAUSE_MS=180
+TTS_PARAGRAPH_PAUSE_MS=320
+TTS_SPEAKER_CHANGE_PAUSE_MS=260
+TTS_CHAPTER_PAUSE_MS=700
+```
+
+`PIPER_DEVICE=auto` usa CUDA si ONNX Runtime anuncia `CUDAExecutionProvider`; de lo contrario usa CPU e informa de que una novela larga puede tardar. Para forzar CPU usa `cpu`. Para GPU instala `onnxruntime-gpu` compatible con tu CUDA y usa `cuda`; si CUDA no está disponible se muestra un error, sin cambiar silenciosamente de proveedor. `TTS_PROVIDER=system` recupera el motor `pyttsx3` de V0.6.
+
+El catálogo formaliza id, nombre visible, idioma, proveedor, género, descripción/estilo y audio de referencia cuando existen. No inventa campos ausentes. `strategy` admite `dedicated` y `generic_pool`; en V0.7 la elección es manual y las asignaciones personaje → voz se conservan en `analysis.json`. Velocidad y volumen están preparados; pitch, estilo y clonación solo se habilitan si un proveedor declara esas capacidades.
+
+## Long audiobook generation
+
+Cada segmento se divide respetando párrafos, frases y palabras. El formato interno es WAV PCM y la concatenación escribe bloques pequeños, por lo que no carga una novela completa en RAM y no requiere FFmpeg.
+
+Antes de sintetizar se calcula un SHA-256 con texto, voz, proveedor, modelo y ajustes. Un hit reutiliza el WAV; cualquier cambio relevante crea otra clave. La web guarda la caché en `work/<id>/cache/audio/`. `generation_state.json` registra capítulos `running`, `completed`, `failed` o `cancelled`. Al repetir la ejecución, los capítulos completos con la misma huella se reutilizan y un capítulo parcial aprovecha sus segmentos cacheados.
+
+La reanudación está activa por defecto:
+
+```powershell
+smart-audiobook novela.txt --tts-provider piper
+smart-audiobook novela.txt --tts-provider piper --force-regenerate
+smart-audiobook novela.txt --tts-provider piper --no-resume
+```
+
+`--force-regenerate` ignora caché y capítulos completados. La web muestra progreso por polling y permite solicitar cancelación entre fragmentos. Lo ya cacheado se conserva.
+
 ## Arquitectura
 
 ```text
 src/smart_audiobook/
 ├── application.py            # Servicio compartido por CLI y web
 ├── audio.py                  # Síntesis ordenada y combinación WAV
+├── audio_cache.py            # Caché SHA-256 persistente y atómica
 ├── book_processor.py         # Orquestación de libro, capítulos y metadatos
 ├── chapter_detection.py      # Heurísticas y estilos DOCX
 ├── characters.py             # Registro canónico de personajes
@@ -294,14 +351,17 @@ src/smart_audiobook/
 ├── llm_resolver.py           # Prompt y validación del dominio
 ├── models.py                 # Document, Chapter y modelos de diálogo
 ├── output_files.py           # Nombres seguros y metadata.json
+├── piper_provider.py         # Adaptador neuronal local opcional
 ├── review_service.py         # Edición consistente y generación revisada
 ├── review_store.py           # Persistencia JSON temporal por UUID
 ├── segmenter.py              # Narración frente a diálogo
 ├── speaker_identification.py # Reglas, fallback y caché
 ├── speaker_resolvers.py      # Contrato y reglas deterministas
 ├── text_normalizer.py        # Normalización explícita
+├── text_chunking.py          # Fragmentación respetuosa con frases
 ├── tts.py                    # Motor de voz local
-├── tts_providers.py          # Contrato TTS, catálogo y adaptador local
+├── tts_config.py             # Configuración y factoría de proveedores
+├── tts_providers.py          # Contrato, capacidades y motor del sistema
 ├── voice_assignment.py       # Personaje → voz
 ├── web.py                    # Rutas FastAPI del flujo análisis/revisión/generación
 ├── web_security.py           # Uploads, firmas y rutas permitidas
@@ -310,6 +370,31 @@ src/smart_audiobook/
 ```
 
 `AudiobookApplicationService` continúa siendo el punto de entrada compartido. La CLI conserva `process()` para el flujo automático; la web usa `analyze()` y solo llama a `generate()` después de la revisión. `ReviewService` aplica las ediciones y `ReviewProjectStore` persiste el estado. Las rutas HTTP validan el borde web y no contienen reglas de personajes, voces ni TTS.
+
+```text
+                    TTSProvider
+                        |
+          +-------------+-------------+
+          |                           |
+       PiperTTS                  SystemTTS
+          |
+       Modelos
+          |
+      Audio Cache
+          |
+      Segment WAV
+          |
+     Chapter Builder
+          |
+       Book Builder
+
+Document → Analysis → Review → Voice Assignment → TTS Queue
+                                                        ↓
+                                                  Cache lookup
+                                          HIT → reuse | MISS → synthesize
+                                                        ↓
+                                      Chapter WAV → Full audiobook WAV
+```
 
 ```text
 SpeakerIdentificationService
@@ -341,7 +426,7 @@ python -m pip install -e ".[web,test,llm]"
 python -m unittest discover -s tests -v
 ```
 
-La suite cubre el pipeline anterior y la web: upload, persistencia, edición de speakers, personajes nuevos, renombrado, fusión, normalización, voces, preview y caché, filtros, paginación, generación revisada, descargas y seguridad. Gemini y el TTS se simulan cuando corresponde; las pruebas automatizadas no consumen API ni generan voz real.
+La suite cubre el pipeline anterior y la web, además del contrato TTS, catálogo Piper, CPU fallback, capabilities, claves e invalidación de caché, hits/misses, chunking, fallos, reanudación y capítulos idempotentes. Gemini y Piper se simulan cuando corresponde; las pruebas normales no consumen API, descargan modelos ni cargan redes neuronales. La integración real Piper es opt-in con `RUN_PIPER_INTEGRATION=1`.
 
 ## Limitaciones conocidas
 
@@ -352,8 +437,9 @@ La suite cubre el pipeline anterior y la web: upload, persistencia, edición de 
 - Solo se detectan diálogos con raya larga; las comillas aún no se tratan como diálogo.
 - Las reglas de hablante cubren un conjunto limitado de verbos de habla en español.
 - Si faltan voces, se reutilizan de forma cíclica.
-- El análisis y la generación web son síncronos; un documento grande mantiene abierta la petición hasta terminar.
+- La generación web usa una tarea local y polling; no es una cola distribuida. Tras reiniciar la aplicación hay que iniciar de nuevo la acción, que continúa desde caché/estado.
 - El estado de revisión es temporal pero sobrevive a reinicios mientras permanezca su directorio bajo `work/`.
 - No existe todavía limpieza automática de espacios de trabajo antiguos.
-- No hay autenticación ni separación entre usuarios; V0.5 está pensada para uso local.
-- La salida de audio de V0.5 es WAV, no MP3.
+- No hay autenticación ni separación entre usuarios; V0.7 está pensada para uso local.
+- La salida de audio de V0.7 es WAV, no MP3.
+- La variedad y expresividad dependen del modelo Piper elegido; V0.7 no infiere edad, género ni estilos interpretativos.
