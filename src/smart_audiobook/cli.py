@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -17,9 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
     """Create the command-line argument parser."""
     parser = argparse.ArgumentParser(
         prog="smart-audiobook",
-        description="Convierte documentos TXT, PDF o DOCX en un audiolibro WAV.",
+        description="Convierte documentos TXT, PDF, DOCX o EPUB en un audiolibro WAV.",
     )
-    parser.add_argument("input", type=Path, help="Ruta del documento TXT, PDF o DOCX.")
+    parser.add_argument("input", type=Path, help="Ruta del documento TXT, PDF, DOCX o EPUB.")
     parser.add_argument(
         "-o",
         "--output",
@@ -70,7 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the Smart Audiobook command-line application."""
     _configure_cli_logging()
-    args = build_parser().parse_args(argv)
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    if arguments and arguments[0] in {"import", "chapters", "preview", "analyze", "generate", "clear-cache"}:
+        return _book_command(arguments)
+    args = build_parser().parse_args(arguments)
 
     try:
         service = AudiobookApplicationService()
@@ -117,6 +121,60 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Audiolibro generado correctamente: {generated.directory.resolve()}")
     print(f"Audio completo: {generated.full_audiobook.resolve()}")
     print(f"Metadatos: {generated.metadata.resolve()}")
+    return 0
+
+
+def _book_command(arguments: list[str]) -> int:
+    from smart_audiobook.review_service import ReviewService
+    from smart_audiobook.review_store import ReviewProjectStore
+    from smart_audiobook.book_manifest import document_index
+    parser = argparse.ArgumentParser(prog=f"smart-audiobook {arguments[0]}")
+    parser.add_argument("target", help="Archivo para import; UUID del proyecto para los demás comandos.")
+    parser.add_argument("--work-root", type=Path, default=Path("work"))
+    parser.add_argument("--chapters", help="Rango/lista: 1-10,25,100-150.")
+    parser.add_argument("--chapter", type=int, help="Capítulo para preview o clear-cache.")
+    parser.add_argument("--no-llm", action="store_true")
+    parser.add_argument("--reanalyze", action="store_true", help="Volver a resolver speakers conservando overrides.")
+    parser.add_argument("--force-regenerate", action="store_true")
+    parser.add_argument("--estimates", action="store_true", help="Contar diálogos localmente sin Gemini.")
+    parser.add_argument("--tts-provider", choices=("piper", "system"))
+    args = parser.parse_args(arguments[1:])
+    command = arguments[0]
+    try:
+        review = ReviewService(ReviewProjectStore(args.work_root), build_tts_provider(
+            TTSConfig.from_environment(provider_override=args.tts_provider)))
+        if command == "import":
+            project = review.books.import_book(Path(args.target))
+        else:
+            project = review.load(args.target)
+            if args.chapters:
+                project = review.books.select_expression(project.processing_id, args.chapters)
+            if command == "preview":
+                if args.chapter is None:
+                    raise ValueError("preview requiere --chapter.")
+                chapter = review.books.preview(project.processing_id, args.chapter)
+                print(json.dumps({"number": chapter.number, "title": chapter.title,
+                    "source_reference": chapter.source_reference, "cleaning_notes": chapter.cleaning_notes,
+                    "text": chapter.text}, ensure_ascii=False, indent=2))
+                return 0
+            if command == "analyze":
+                project = review.books.analyze(project.processing_id, reanalyze=args.reanalyze, use_llm=not args.no_llm)
+            elif command == "generate":
+                project = review.generate(project.processing_id, force_regenerate=args.force_regenerate)
+            elif command == "clear-cache":
+                if args.chapter is None:
+                    raise ValueError("clear-cache requiere --chapter.")
+                project = review.books.clear_chapter_cache(project.processing_id, args.chapter)
+        print(json.dumps({"project_id": project.processing_id, "book": document_index(project.analysis.document),
+            "statistics": review.books.statistics(project.processing_id, args.estimates),
+            "analyzed_chapters": len(project.analysis.chapters),
+            "chapters": [{"number": ch.number, "id": ch.id, "title": ch.title, "status": ch.status.value,
+                "selected": ch.selected_for_processing, "narrate": ch.narrate, "words": ch.word_count,
+                "consistency_warning": ch.consistency_warning} for ch in project.analysis.document.chapters],
+            "audio": str(project.output.full_audiobook) if project.output else None}, ensure_ascii=False, indent=2))
+    except (ValueError, OSError, SpeechGenerationError) as error:
+        print(f"Error: {error}")
+        return 1
     return 0
 
 
