@@ -2,7 +2,7 @@
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import RLock
 from typing import Any, cast
@@ -13,7 +13,8 @@ from smart_audiobook.book_processor import (
     BookAnalysis,
     BookOutput,
 )
-from smart_audiobook.models import Document, DocumentFormat, TextSegment
+from smart_audiobook.models import Chapter, ChapterStatus, Document, DocumentFormat, TextSegment
+from smart_audiobook.book_manifest import persist_document, manifest_payload, write_json, load_manifest_document
 from smart_audiobook.characters import CharacterRegistry
 from smart_audiobook.tts_providers import VoiceInfo
 
@@ -34,6 +35,9 @@ class ReviewProject:
     voices: tuple[VoiceInfo, ...]
     voice_assignments: dict[str, str]
     output: BookOutput | None = None
+    imported: bool = False
+    _persisted_chapters: dict[int, AnalyzedChapter] = field(default_factory=dict, repr=False)
+    _persisted_voice_assignments: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def segments(self) -> tuple[TextSegment, ...]:
@@ -75,6 +79,29 @@ class ReviewProjectStore:
         (directory / "previews").mkdir()
         return processing_id, directory
 
+    def recover_interrupted(self) -> None:
+        """On local server startup, make interrupted chapters retryable again."""
+        for directory in self.root.iterdir():
+            if not directory.is_dir() or PROCESSING_ID_PATTERN.fullmatch(directory.name) is None:
+                continue
+            path = directory / "project.json"
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if payload.get("schema_version") != 3:
+                    continue
+                changed = False
+                for chapter in payload.get("chapters", ()):
+                    if chapter.get("status") in {ChapterStatus.ANALYZING.value, ChapterStatus.GENERATING_AUDIO.value}:
+                        chapter["status"] = ChapterStatus.FAILED.value
+                        chapter["consistency_warning"] = "Procesamiento interrumpido; vuelve a iniciar la acción para continuar."
+                        changed = True
+                if changed:
+                    write_json(path, payload)
+            except (ValueError, OSError, TypeError):
+                continue
+
     def directory(self, processing_id: str) -> Path:
         self._validate_id(processing_id)
         return self.root / processing_id
@@ -88,15 +115,52 @@ class ReviewProjectStore:
             if profile:
                 profile.voice_id = voice_id
         project.analysis.registry.rebuild_statistics(project.segments)
+        document = project.analysis.document
+        if not document.chapters:
+            document = replace(document, chapters=tuple(Chapter(ch.number, ch.title,
+                "\n\n".join(s.text for s in ch.segments), status=ChapterStatus.ANALYZED)
+                for ch in project.analysis.chapters))
+        document = persist_document(document, directory)
+        if project.imported and project.output is None:
+            changed = set()
+            previous_assignments = project._persisted_voice_assignments
+            state_file = directory / "analysis.json"
+            if not previous_assignments and state_file.is_file():
+                previous_assignments = json.loads(state_file.read_text(encoding="utf-8")).get("voice_assignments", {})
+            for analyzed in project.analysis.chapters:
+                unchanged = project._persisted_chapters.get(analyzed.number) == analyzed
+                voices_changed = any(previous_assignments.get(s.speaker) != project.voice_assignments.get(s.speaker)
+                                     for s in analyzed.segments)
+                if unchanged and not voices_changed:
+                    continue
+                source = next(ch for ch in document.chapters if ch.number == analyzed.number)
+                old_path = directory / "chapters" / f"{source.id}.analysis.json"
+                if old_path.is_file():
+                    old = json.loads(old_path.read_text(encoding="utf-8"))["segments"]
+                    if (old != [s.as_dict() for s in analyzed.segments] or any(
+                            previous_assignments.get(s.speaker) != project.voice_assignments.get(s.speaker)
+                            for s in analyzed.segments)):
+                        changed.add(analyzed.number)
+            if changed:
+                from smart_audiobook.book_workflow import chapter_state
+                analyzed_by_number = {ch.number: ch for ch in project.analysis.chapters}
+                document = replace(document, chapters=tuple(replace(ch,
+                    status=chapter_state(analyzed_by_number[ch.number].segments)) if ch.number in changed else
+                    replace(ch, consistency_warning=f"Revisar continuidad: cambió el capítulo {min(changed)}.")
+                    if ch.number > min(changed) and ch.status != ChapterStatus.NOT_ANALYZED else ch for ch in document.chapters))
+        project.analysis = replace(project.analysis, document=document)
         payload = _project_to_dict(project, directory)
         target = directory / "analysis.json"
         temporary = directory / "analysis.json.tmp"
         with self._lock:
+            write_json(directory / "project.json", manifest_payload(project))
             temporary.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
             temporary.replace(target)
+            project._persisted_chapters = {ch.number: ch for ch in project.analysis.chapters}
+            project._persisted_voice_assignments = dict(project.voice_assignments)
 
     def load(self, processing_id: str) -> ReviewProject:
         directory = self.directory(processing_id)
@@ -106,8 +170,28 @@ class ReviewProjectStore:
         try:
             with self._lock:
                 payload = json.loads(target.read_text(encoding="utf-8"))
-            return _project_from_dict(payload, directory)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            project = _project_from_dict(payload, directory)
+            if (directory / "project.json").is_file():
+                document, project.imported = load_manifest_document(directory, project.source_name)
+                project.analysis = replace(project.analysis, document=document)
+            else:
+                # V0.8 projects had no manifest. Re-import structure only, never speakers.
+                from smart_audiobook.document_loaders import load_document, DocumentLoadError
+                try:
+                    document = load_document(project.analysis.document.source_path)
+                except DocumentLoadError:
+                    document = replace(project.analysis.document, chapters=tuple(Chapter(ch.number, ch.title,
+                        "\n\n".join(s.text for s in ch.segments)) for ch in project.analysis.chapters))
+                analyzed = {ch.number: ch for ch in project.analysis.chapters}
+                document = replace(document, chapters=tuple(replace(ch,
+                    status=ChapterStatus.REVIEW_REQUIRED if any(s.review_needed for s in analyzed[ch.number].segments)
+                    else ChapterStatus.READY_FOR_AUDIO) if ch.number in analyzed else ch for ch in document.chapters))
+                project.analysis = replace(project.analysis, document=document)
+                project.imported = True
+            project._persisted_chapters = {ch.number: ch for ch in project.analysis.chapters}
+            project._persisted_voice_assignments = dict(project.voice_assignments)
+            return project
+        except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
             raise ReviewStateError("El estado temporal del análisis no es válido.") from error
 
     @staticmethod
@@ -135,7 +219,9 @@ def _project_to_dict(project: ReviewProject, directory: Path) -> dict[str, Any]:
             {
                 "number": chapter.number,
                 "title": chapter.title,
-                "segments": [segment.as_dict() for segment in chapter.segments],
+                **(_persist_analysis_chapter(chapter, document, directory,
+                    project._persisted_chapters.get(chapter.number) == chapter) if project.imported else
+                   {"segments": [segment.as_dict() for segment in chapter.segments]}),
             }
             for chapter in project.analysis.chapters
         ],
@@ -177,19 +263,31 @@ def _project_to_dict(project: ReviewProject, directory: Path) -> dict[str, Any]:
     return payload
 
 
+def _persist_analysis_chapter(chapter: AnalyzedChapter, document: Document, directory: Path, unchanged: bool) -> dict:
+    source = next(ch for ch in document.chapters if ch.number == chapter.number)
+    reference = f"chapters/{source.id}.analysis.json"
+    if not unchanged or not (directory / reference).is_file():
+        write_json(directory / reference, {"segments": [s.as_dict() for s in chapter.segments]})
+    return {"analysis_reference": reference}
+
+
 def _project_from_dict(payload: dict[str, Any], directory: Path) -> ReviewProject:
     if int(payload.get("schema_version", 1)) > 2:
         raise ReviewStateError("Versión de proyecto no compatible.")
     processing_id = str(payload["processing_id"])
     ReviewProjectStore._validate_id(processing_id)
+    if processing_id != directory.name:
+        raise ReviewStateError("Identificador de estado incoherente.")
     source_name = str(payload["source_name"])
     document_data = payload["document"]
+    if Path(source_name).name != source_name or "\\" in source_name:
+        raise ReviewStateError("Nombre de origen no seguro.")
     source_path = directory / "source" / source_name
     chapters = tuple(
         AnalyzedChapter(
             number=int(chapter["number"]),
             title=str(chapter["title"]),
-            segments=tuple(_segment_from_dict(item) for item in chapter["segments"]),
+            segments=tuple(_segment_from_dict(item) for item in _chapter_segments(chapter, directory)),
         )
         for chapter in payload["chapters"]
     )
@@ -280,7 +378,16 @@ def _segment_from_dict(data: dict[str, Any]) -> TextSegment:
             data.get("confidence") is not None and float(data["confidence"]) < 0.85
         ))),
         new_character_candidate=data.get("new_character_candidate"),
+        emphasis=tuple(data.get("emphasis", ())),
+        scene_break_before=bool(data.get("scene_break_before", False)),
     )
+
+
+def _chapter_segments(chapter: dict, directory: Path) -> list:
+    if "analysis_reference" in chapter:
+        path = _safe_project_path(directory, chapter["analysis_reference"])
+        return json.loads(path.read_text(encoding="utf-8"))["segments"]
+    return chapter["segments"]
 
 
 def _relative_path(path: Path, directory: Path) -> str:

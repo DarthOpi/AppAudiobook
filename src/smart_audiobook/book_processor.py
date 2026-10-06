@@ -81,7 +81,7 @@ def analyze_book(
     global_order = 0
     for chapter in document.chapters:
         indexed_segments = []
-        for segment in segment_text(chapter.text):
+        for segment in segment_text(chapter.read_text()):
             global_order += 1
             indexed_segments.append(
                 replace(
@@ -114,6 +114,7 @@ def generate_book(
     tts_config: TTSConfig | None = None,
     state_callback: StateCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    chapter_cache_directories: dict[int, Path] | None = None,
 ) -> BookOutput:
     """Generate chapters idempotently and persist progress after every chunk."""
     started = time.monotonic()
@@ -123,6 +124,7 @@ def generate_book(
         segment_ms=config.segment_pause_ms,
         paragraph_ms=config.paragraph_pause_ms,
         speaker_change_ms=config.speaker_change_pause_ms,
+        scene_break_ms=config.scene_break_pause_ms,
     )
     output_directory = output_root / safe_filename(analysis.document.title, "book")
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -189,6 +191,9 @@ def generate_book(
     completed_chunks = 0
     try:
         for chapter_index, chapter in enumerate(analysis.chapters, start=1):
+            if chapter_cache_directories and chapter.number in chapter_cache_directories:
+                cache.root = chapter_cache_directories[chapter.number].resolve()
+                cache.root.mkdir(parents=True, exist_ok=True)
             chapter_name = safe_filename(chapter.title, f"chapter_{chapter.number}")
             chapter_path = output_directory / f"{chapter.number:02d}_{chapter_name}.wav"
             fingerprint = _chapter_fingerprint(
@@ -209,6 +214,8 @@ def generate_book(
                 completed_segments += len(chapter.segments)
                 completed_chunks += chapter_chunk_counts[chapter.number]
                 state["segments_completed"] = completed_chunks
+                state["completed_chapter"] = chapter.number
+                _save_state(state_path, state, state_callback)
                 continue
 
             state["chapter_current"] = chapter_index
@@ -253,6 +260,7 @@ def generate_book(
             completed_segments += len(chapter.segments)
             completed_chunks += chapter_chunk_counts[chapter.number]
             state["segments_completed"] = completed_chunks
+            state["completed_chapter"] = chapter.number
             LOGGER.info("Chapter generated: %d", chapter.number)
             _save_state(state_path, state, state_callback)
 
@@ -371,7 +379,8 @@ def _chapter_fingerprint(
 ) -> str:
     payload = {
         "segments": [
-            {"text": item.text, "speaker": item.speaker, "voice": assignments[item.speaker]}
+            {"text": item.text, "speaker": item.speaker, "voice": assignments[item.speaker],
+             "scene_break_before": item.scene_break_before}
             for item in chapter.segments
         ],
         "provider": provider_id(provider),

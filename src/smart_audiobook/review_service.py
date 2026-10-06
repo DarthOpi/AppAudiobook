@@ -12,7 +12,7 @@ from smart_audiobook.application import AudiobookApplicationService, ProcessingR
 from smart_audiobook.audio_cache import AudioCache
 from smart_audiobook.book_processor import AnalyzedChapter, BookAnalysis
 from smart_audiobook.characters import normalize_character_name, CharacterRegistry
-from smart_audiobook.models import NARRATOR, UNKNOWN_SPEAKER, TextSegment
+from smart_audiobook.models import ChapterStatus, NARRATOR, UNKNOWN_SPEAKER, TextSegment
 from smart_audiobook.review_store import (
     ReviewProject,
     ReviewProjectStore,
@@ -98,12 +98,24 @@ class ReviewService:
     def load(self, processing_id: str) -> ReviewProject:
         return self.store.load(processing_id)
 
+    def _editable_project(self, processing_id: str) -> ReviewProject:
+        project = self.load(processing_id)
+        if any(ch.status in {ChapterStatus.ANALYZING, ChapterStatus.GENERATING_AUDIO}
+               for ch in project.analysis.document.chapters):
+            raise ReviewStateError("Espera a que termine el procesamiento antes de editar el proyecto.")
+        return project
+
+    @property
+    def books(self):
+        from smart_audiobook.book_workflow import BookWorkflow
+        return BookWorkflow(self)
+
     def update_speakers(
         self,
         processing_id: str,
         updates: dict[str, str],
     ) -> ReviewProject:
-        project = self.load(processing_id)
+        project = self._editable_project(processing_id)
         known = list(project.characters)
         changed: dict[str, str] = {}
         for segment in project.dialogues:
@@ -133,7 +145,7 @@ class ReviewService:
         current_name: str,
         new_name: str,
     ) -> ReviewProject:
-        project = self.load(processing_id)
+        project = self._editable_project(processing_id)
         if current_name in {NARRATOR, UNKNOWN_SPEAKER}:
             raise ReviewStateError("Narrator y Unknown no se pueden renombrar.")
         current = _find_character(project.characters, current_name)
@@ -156,7 +168,7 @@ class ReviewService:
         target_name: str,
         known_from: int = 1,
     ) -> ReviewProject:
-        project = self.load(processing_id)
+        project = self._editable_project(processing_id)
         if source_name in {NARRATOR, UNKNOWN_SPEAKER}:
             raise ReviewStateError("Ese personaje no se puede fusionar.")
         source = _find_character(project.characters, source_name)
@@ -180,7 +192,7 @@ class ReviewService:
         character: str,
         voice_id: str,
     ) -> ReviewProject:
-        project = self.load(processing_id)
+        project = self._editable_project(processing_id)
         canonical = _find_character(project.characters, character)
         if voice_id not in {voice.id for voice in project.voices}:
             raise ReviewStateError("La voz seleccionada no está disponible.")
@@ -195,7 +207,7 @@ class ReviewService:
 
     def edit_alias(self, processing_id: str, character: str, alias: str,
                    known_from: int = 1, remove: bool = False) -> ReviewProject:
-        project = self.load(processing_id)
+        project = self._editable_project(processing_id)
         try:
             if remove:
                 project.analysis.registry.remove_alias(character, alias)
@@ -203,13 +215,18 @@ class ReviewService:
                 project.analysis.registry.add_alias(character, alias, known_from)
         except ValueError as error:
             raise ReviewStateError(str(error)) from error
+        if project.imported:
+            project.analysis = replace(project.analysis, document=replace(project.analysis.document,
+                chapters=tuple(replace(ch, consistency_warning=f"Revisar aliases: cambió el conocimiento desde el capítulo {known_from}.")
+                    if ch.number >= known_from and ch.status != ChapterStatus.NOT_ANALYZED else ch
+                    for ch in project.analysis.document.chapters)))
         self.store.save(project)
         return project
 
     def reanalyze(self, processing_id: str, selected_ids: set[str] | None = None,
                   low_confidence: bool = False, speaker_service=None) -> ReviewProject:
         from smart_audiobook.application import _build_speaker_service
-        project = self.load(processing_id)
+        project = self._editable_project(processing_id)
         ids = selected_ids if selected_ids is not None else {
             s.id for s in project.dialogues if s.speaker == UNKNOWN_SPEAKER
             or (low_confidence and s.review_needed)
@@ -238,7 +255,7 @@ class ReviewService:
                           resolver=None) -> ReviewProject:
         """Explicit, optional enrichment; suggestions never become aliases automatically."""
         from smart_audiobook.gemini_resolver import build_gemini_resolver_from_environment
-        project = self.load(processing_id)
+        project = self._editable_project(processing_id)
         profile = project.analysis.registry.require(character)
         evidence = [s.text[:300] for s in project.segments if s.chapter <= chapter
                     and (s.speaker == profile.canonical_name or profile.canonical_name in
@@ -266,12 +283,23 @@ class ReviewService:
         path, _hit = cache.synthesize(self.tts_provider, PREVIEW_TEXT, voice_id)
         return path
 
-    def generate(self, processing_id: str) -> ReviewProject:
+    def generate(self, processing_id: str, chapter_numbers: set[int] | None = None,
+                 force_regenerate: bool = False) -> ReviewProject:
         project = self.load(processing_id)
+        analysis = project.analysis
+        if project.imported:
+            selected = chapter_numbers if chapter_numbers is not None else {
+                ch.number for ch in analysis.document.chapters if ch.selected_for_processing and ch.narrate}
+            analyzed = {ch.number for ch in analysis.chapters}
+            if not selected or not selected.issubset(analyzed):
+                raise ReviewStateError("Analiza primero todos los capítulos seleccionados.")
+            analysis = replace(analysis, chapters=tuple(ch for ch in analysis.chapters if ch.number in selected))
+        else:
+            selected = {ch.number for ch in analysis.chapters}
         available_voice_ids = {voice.id for voice in project.voices}
         if not available_voice_ids:
             raise SpeechGenerationError("No se encontraron voces disponibles.")
-        used_speakers = {segment.speaker for segment in project.segments}
+        used_speakers = {segment.speaker for ch in analysis.chapters for segment in ch.segments}
         missing = sorted(
             speaker
             for speaker in used_speakers
@@ -301,13 +329,71 @@ class ReviewService:
                 state_path=directory / "generation_state.json",
                 resume=True,
                 cancel_check=cancel_marker.exists,
+                force_regenerate=force_regenerate,
             )
-        result = self.application.generate(
-            project.analysis,
-            directory / "audio",
-            **kwargs,
-        )
+            if project.imported:
+                from smart_audiobook.tts_config import TTSConfig
+                config = TTSConfig.from_environment(provider_override=(provider_id(self.tts_provider)
+                    if provider_id(self.tts_provider) in {"piper", "system"} else None))
+                # Chapter WAVs stay independent; composition inserts chapter pauses once.
+                kwargs["tts_config"] = replace(config, chapter_pause_ms=0)
+                kwargs["chapter_cache_directories"] = {ch.number: directory / "cache" / "chapters" / ch.id
+                    for ch in project.analysis.document.chapters}
+                running = set()
+                def update_chapter_progress(state):
+                    from smart_audiobook.book_manifest import manifest_payload, write_json
+                    running.update(int(key) for key, value in state.get("chapters", {}).items()
+                                   if value.get("status") == "running" and int(key) in selected)
+                    completed = {int(key) for key, value in state.get("chapters", {}).items()
+                                 if value.get("status") == "completed" and int(key) in running}
+                    if state.get("completed_chapter") in selected:
+                        completed.add(state["completed_chapter"])
+                    if not completed:
+                        return
+                    chapters = tuple(replace(ch, status=ChapterStatus.COMPLETED) if ch.number in completed else ch
+                                     for ch in project.analysis.document.chapters)
+                    if chapters != project.analysis.document.chapters:
+                        project.analysis = replace(project.analysis, document=replace(project.analysis.document, chapters=chapters))
+                        write_json(directory / "project.json", manifest_payload(project))
+                kwargs["state_callback"] = update_chapter_progress
+        if project.imported:
+            project.analysis = replace(project.analysis, document=replace(project.analysis.document,
+                chapters=tuple(replace(ch, status=ChapterStatus.GENERATING_AUDIO) if ch.number in selected else ch
+                               for ch in project.analysis.document.chapters)))
+            self.store.save(project)
+        try:
+            result = self.application.generate(analysis, directory / "audio", **kwargs)
+        except Exception:
+            if project.imported:
+                project.analysis = replace(project.analysis, document=replace(project.analysis.document,
+                    chapters=tuple(replace(ch, status=ChapterStatus.FAILED) if ch.number in selected and ch.status != ChapterStatus.COMPLETED else ch
+                                   for ch in project.analysis.document.chapters)))
+                self.store.save(project)
+            raise
         project.output = result.output
+        if project.imported:
+            project.analysis = replace(project.analysis, document=replace(project.analysis.document,
+                chapters=tuple(replace(ch, status=ChapterStatus.COMPLETED) if ch.number in selected else ch
+                               for ch in project.analysis.document.chapters)))
+            # Include previously completed, still-valid chapters in the assembled book.
+            from smart_audiobook.audio import combine_wav_files_with_pauses
+            from smart_audiobook.tts_config import TTSConfig
+            from smart_audiobook.output_files import safe_filename
+            files = []
+            for ch in project.analysis.document.chapters:
+                path = result.output.directory / f"{ch.number:02d}_{safe_filename(ch.title, f'chapter_{ch.number}')}.wav"
+                if ch.status == ChapterStatus.COMPLETED and path.is_file():
+                    files.append(path)
+            chapter_pause = TTSConfig.from_environment().chapter_pause_ms
+            combine_wav_files_with_pauses([(path, chapter_pause if index else 0)
+                for index, path in enumerate(files)], result.output.full_audiobook)
+            project.output = replace(result.output, chapter_files=tuple(files))
+            metadata = json.loads(result.output.metadata.read_text(encoding="utf-8"))
+            metadata["chapter_count"] = len(files)
+            metadata["book_chapter_count"] = len(project.analysis.document.chapters)
+            metadata["outputs"]["chapters"] = [p.name for p in files]
+            from smart_audiobook.book_manifest import write_json
+            write_json(result.output.metadata, metadata)
         self.store.save(project)
         return project
 

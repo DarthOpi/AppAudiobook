@@ -37,7 +37,8 @@ class ProcessingResult:
 
     @property
     def word_count(self) -> int:
-        return len(self.analysis.document.full_text.split())
+        document = self.analysis.document
+        return sum(ch.word_count for ch in document.chapters) or len(document.full_text.split())
 
 
 class AudiobookApplicationService:
@@ -66,6 +67,10 @@ class AudiobookApplicationService:
         )
         LOGGER.info("Characters detected: %d", len(analysis.characters))
         return analysis
+
+    def speaker_service(self, use_llm: bool = True) -> SpeakerIdentificationService:
+        """Provide the same configured resolver to incremental chapter workflows."""
+        return self._speaker_service_factory(use_llm)
 
     def process(
         self,
