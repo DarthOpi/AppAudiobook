@@ -1,6 +1,7 @@
 """Application service for reviewing speakers and voices before TTS."""
 
-import hashlib
+import inspect
+import json
 import logging
 import shutil
 from dataclasses import replace
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from smart_audiobook.application import AudiobookApplicationService, ProcessingResult
+from smart_audiobook.audio_cache import AudioCache
 from smart_audiobook.book_processor import AnalyzedChapter, BookAnalysis
 from smart_audiobook.characters import normalize_character_name
 from smart_audiobook.models import NARRATOR, UNKNOWN_SPEAKER, TextSegment
@@ -17,7 +19,12 @@ from smart_audiobook.review_store import (
     ReviewStateError,
 )
 from smart_audiobook.tts import SpeechGenerationError
-from smart_audiobook.tts_providers import TTSProvider
+from smart_audiobook.tts_providers import (
+    TTSProvider,
+    provider_capabilities,
+    provider_id,
+    provider_model,
+)
 from smart_audiobook.voice_assignment import assign_voices
 
 PREVIEW_TEXT = "Hola. Esta es una prueba de mi voz para el audiolibro."
@@ -50,6 +57,15 @@ class ReviewService:
         self.store = store
         self.tts_provider = tts_provider
         self.application = application or AudiobookApplicationService()
+
+    @property
+    def provider_status(self) -> dict[str, object]:
+        return {
+            "id": provider_id(self.tts_provider),
+            "model": provider_model(self.tts_provider),
+            "ready": True,
+            "capabilities": provider_capabilities(self.tts_provider),
+        }
 
     def start_analysis(self, source_path: Path, source_name: str) -> ReviewProject:
         processing_id, directory = self.store.create_workspace()
@@ -162,11 +178,9 @@ class ReviewService:
         project = self.load(processing_id)
         if voice_id not in {voice.id for voice in project.voices}:
             raise ReviewStateError("La voz seleccionada no está disponible.")
-        digest = hashlib.sha256(voice_id.encode("utf-8")).hexdigest()[:20]
-        path = self.store.directory(processing_id) / "previews" / f"{digest}.wav"
-        if path.is_file() and path.stat().st_size:
-            return path
-        return self.tts_provider.synthesize(PREVIEW_TEXT, path, voice_id)
+        cache = AudioCache(self.store.directory(processing_id) / "cache" / "audio")
+        path, _hit = cache.synthesize(self.tts_provider, PREVIEW_TEXT, voice_id)
+        return path
 
     def generate(self, processing_id: str) -> ReviewProject:
         project = self.load(processing_id)
@@ -185,15 +199,52 @@ class ReviewService:
             raise SpeechGenerationError(
                 "Falta una voz válida para: " + ", ".join(missing)
             )
+        directory = self.store.directory(processing_id)
+        cancel_marker = directory / "cancel.requested"
+        cancel_marker.unlink(missing_ok=True)
+        kwargs: dict[str, object] = {
+            "voices_by_speaker": project.voice_assignments,
+            "tts_provider": self.tts_provider,
+        }
+        signature = inspect.signature(self.application.generate)
+        supports_options = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if supports_options:
+            kwargs.update(
+                cache_directory=directory / "cache" / "audio",
+                state_path=directory / "generation_state.json",
+                resume=True,
+                cancel_check=cancel_marker.exists,
+            )
         result = self.application.generate(
             project.analysis,
-            self.store.directory(processing_id) / "audio",
-            voices_by_speaker=project.voice_assignments,
-            tts_provider=self.tts_provider,
+            directory / "audio",
+            **kwargs,
         )
         project.output = result.output
         self.store.save(project)
         return project
+
+    def generation_status(self, processing_id: str) -> dict[str, object]:
+        self.load(processing_id)
+        path = self.store.directory(processing_id) / "generation_state.json"
+        if not path.is_file():
+            return {"status": "pending", "percent": 0}
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"status": "pending", "percent": 0}
+        completed = int(state.get("segments_completed", 0))
+        total = max(1, int(state.get("segments_total", 1)))
+        state["percent"] = min(100, round(completed * 100 / total))
+        return state
+
+    def cancel_generation(self, processing_id: str) -> None:
+        self.load(processing_id)
+        marker = self.store.directory(processing_id) / "cancel.requested"
+        marker.write_text("cancel\n", encoding="utf-8")
 
 
 def _all_segments(analysis: BookAnalysis) -> tuple[TextSegment, ...]:

@@ -10,6 +10,7 @@ from smart_audiobook.application import AudiobookApplicationService
 from smart_audiobook.book_processor import BookAnalysis
 from smart_audiobook.document_loaders import DocumentLoadError
 from smart_audiobook.tts import SpeechGenerationError
+from smart_audiobook.tts_config import TTSConfig, build_tts_provider
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +45,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Desactiva la resolución LLM aunque exista una clave configurada.",
     )
+    parser.add_argument(
+        "--tts-provider",
+        choices=("piper", "system"),
+        help="Proveedor TTS (si se omite, usa TTS_PROVIDER; por defecto Piper).",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="No reutiliza capítulos completos del estado anterior.",
+    )
+    parser.add_argument(
+        "--force-regenerate",
+        action="store_true",
+        help="Ignora la caché de audio y vuelve a sintetizar todo.",
+    )
     return parser
 
 
@@ -64,11 +80,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         legacy_output = args.output if args.output.suffix.casefold() == ".wav" else None
         output_root = args.output.parent if legacy_output else args.output
+        provider = build_tts_provider(
+            TTSConfig.from_environment(provider_override=args.tts_provider)
+        )
         result = service.process(
             args.input,
             output_root,
             use_llm=not args.no_llm,
             full_audiobook_path=legacy_output,
+            tts_provider=provider,
+            resume=not args.no_resume,
+            force_regenerate=args.force_regenerate,
         )
         if args.show_segments:
             _print_analysis(result.analysis)

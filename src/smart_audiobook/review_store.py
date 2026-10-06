@@ -136,6 +136,11 @@ def _project_to_dict(project: ReviewProject, directory: Path) -> dict[str, Any]:
                 "name": voice.name,
                 "language": voice.language,
                 "gender": voice.gender,
+                "provider": voice.provider,
+                "description": voice.description,
+                "style": voice.style,
+                "reference_audio": voice.reference_audio,
+                "strategy": voice.strategy,
             }
             for voice in project.voices
         ],
@@ -153,6 +158,11 @@ def _project_to_dict(project: ReviewProject, directory: Path) -> dict[str, Any]:
             ),
             "metadata": _relative_path(project.output.metadata, directory),
             "voice_assignments": dict(project.output.voice_assignments),
+            "generation_state": (
+                _relative_path(project.output.generation_state, directory)
+                if project.output.generation_state is not None
+                else None
+            ),
         }
     return payload
 
@@ -188,6 +198,11 @@ def _project_from_dict(payload: dict[str, Any], directory: Path) -> ReviewProjec
             name=str(voice["name"]),
             language=_optional_string(voice.get("language")),
             gender=_optional_string(voice.get("gender")),
+            provider=str(voice.get("provider", "unknown")),
+            description=_optional_string(voice.get("description")),
+            style=_optional_string(voice.get("style")),
+            reference_audio=_optional_string(voice.get("reference_audio")),
+            strategy=voice.get("strategy", "dedicated"),
         )
         for voice in payload["voices"]
     )
@@ -208,6 +223,11 @@ def _project_from_dict(payload: dict[str, Any], directory: Path) -> ReviewProjec
                 str(key): str(value)
                 for key, value in output_data["voice_assignments"].items()
             },
+            generation_state=(
+                _safe_project_path(directory, output_data["generation_state"])
+                if output_data.get("generation_state")
+                else None
+            ),
         )
     return ReviewProject(
         processing_id=processing_id,

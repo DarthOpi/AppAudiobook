@@ -15,6 +15,7 @@ from smart_audiobook.document_loaders import load_document
 from smart_audiobook.gemini_resolver import build_gemini_resolver_from_environment
 from smart_audiobook.speaker_identification import SpeakerIdentificationService
 from smart_audiobook.speaker_resolvers import RuleBasedSpeakerResolver
+from smart_audiobook.tts_config import TTSConfig, build_tts_provider
 from smart_audiobook.tts_providers import TTSProvider
 
 LOGGER = logging.getLogger(__name__)
@@ -71,14 +72,24 @@ class AudiobookApplicationService:
         output_root: Path,
         use_llm: bool = True,
         full_audiobook_path: Path | None = None,
+        tts_provider: TTSProvider | None = None,
+        resume: bool = True,
+        force_regenerate: bool = False,
     ) -> ProcessingResult:
         """Run the complete pipeline and return its presentation-ready result."""
         analysis = self.analyze(source_path, use_llm=use_llm)
         LOGGER.info("Audio generation started: %s", source_path.name)
+        provider = tts_provider or build_tts_provider()
         output = generate_book(
             analysis,
             output_root,
             full_audiobook_path=full_audiobook_path,
+            tts_provider=provider,
+            resume=resume,
+            force_regenerate=force_regenerate,
+            tts_config=TTSConfig.from_environment(
+                provider_override=getattr(provider, "provider_id", None)
+            ),
         )
         LOGGER.info(
             "Audio generation finished: chapters=%d",
@@ -92,14 +103,22 @@ class AudiobookApplicationService:
         output_root: Path,
         voices_by_speaker: dict[str, str] | None = None,
         tts_provider: TTSProvider | None = None,
+        **generation_options: object,
     ) -> ProcessingResult:
         """Generate audio from an already reviewed analysis without re-analysis."""
         LOGGER.info("Audio generation started: %s", analysis.document.title)
+        if "tts_config" not in generation_options:
+            selected = getattr(tts_provider, "provider_id", None)
+            override = selected if selected in {"piper", "system"} else None
+            generation_options["tts_config"] = TTSConfig.from_environment(
+                provider_override=override
+            )
         output = generate_book(
             analysis,
             output_root,
             voices_by_speaker=voices_by_speaker,
             tts_provider=tts_provider,
+            **generation_options,
         )
         LOGGER.info("Audio generation finished: chapters=%d", len(output.chapter_files))
         return ProcessingResult(analysis=analysis, output=output)
