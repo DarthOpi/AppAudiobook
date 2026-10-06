@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}{{ project.analysis.document.title }} · Libro importado{% endblock %}
+{% block content %}
+<section class="result-heading"><div><p class="eyebrow">BOOK IMPORTED</p><h1>{{ project.analysis.document.title }}</h1>
+<p>{{ project.analysis.document.author or 'Autor no declarado' }} · {{ project.analysis.document.format | upper }} · {{ project.analysis.document.language or 'Idioma no declarado' }}</p></div>
+<a class="secondary-button" href="{{ url_for('review_page', processing_id=project.processing_id) }}">Revisar personajes</a></section>
+<section class="stats-grid">
+<article><strong>{{ stats.chapters }}</strong><span>capítulos · {{ stats.total_words }} palabras</span></article>
+<article><strong>{{ stats.selected_chapters }}</strong><span>seleccionados · {{ stats.selected_words }} palabras</span></article>
+<article><strong>{{ analysis_count }} / {{ stats.chapters }}</strong><span>capítulos analizados</span></article>
+<article><strong>{{ audio_count }} / {{ stats.chapters }}</strong><span>capítulos con audio</span></article>
+</section>
+<section class="panel"><h2>Antes de procesar</h2>
+<p>Lectura aproximada: {{ stats.approximate_reading_minutes }} minutos a {{ stats.words_per_minute }} palabras/minuto. Tamaño: {{ stats.size_category }}.</p>
+<p>TTS: {{ stats.tts_provider }} · dispositivo solicitado: {{ stats.device_requested }}. {{ stats.processing_note }}</p>
+<p>{{ stats.cost_note }}</p>
+{% if stats.estimated_dialogues is defined %}<p>Estimación: {{ stats.estimated_dialogues }} diálogos, {{ stats.estimated_segments }} segmentos; {{ stats.estimated_rule_resolution_percent }}% con atribución explícita. Hasta {{ stats.estimated_llm_calls_upper_bound }} llamadas LLM. {{ stats.llm_estimate_note }}</p>{% endif %}
+<a href="{{ url_for('book_overview', processing_id=project.processing_id) }}?estimates=true">Calcular estimación de diálogos sin Gemini</a>
+</section>
+<section class="panel"><h2>Seleccionar capítulos</h2>
+<form method="get" class="compact-form"><input name="q" value="{{ q }}" placeholder="Número o título"><button class="small-button">Buscar</button></form>
+<form action="{{ url_for('select_chapters', processing_id=project.processing_id) }}" method="post">
+<p><button name="action" value="all" class="small-button">Select all</button> <button name="action" value="none" class="small-button">Deselect all</button></p>
+<p><label>Desde <input type="number" name="from" min="1" value="1"></label> <label>Hasta <input type="number" name="to" min="1" value="{{ stats.chapters }}"></label> <button name="action" value="range" class="small-button">Select range</button></p>
+{% for ch in hidden_chapters %}{% if ch.selected_for_processing %}<input type="hidden" name="chapters" value="{{ ch.number }}">{% endif %}{% if ch.narrate %}<input type="hidden" name="narrate" value="{{ ch.number }}">{% endif %}{% endfor %}
+<div style="overflow-x:auto"><table><thead><tr><th>Seleccionar</th><th>Capítulo</th><th>Palabras</th><th>Estado</th><th>Narrar</th><th>Vista previa</th></tr></thead><tbody>
+{% for ch in chapters %}<tr>
+<td><input aria-label="Seleccionar capítulo {{ ch.number }}" type="checkbox" name="chapters" value="{{ ch.number }}" {% if ch.selected_for_processing %}checked{% endif %}></td>
+<td>{{ ch.number }} · {{ ch.title }}{% if ch.section_kind %}<small> · {{ ch.section_kind }}</small>{% endif %}{% if ch.consistency_warning %}<p class="warning-copy">{{ ch.consistency_warning }}</p>{% endif %}</td>
+<td>{{ ch.word_count }}</td><td>{{ ch.status.value }}</td>
+<td><input aria-label="Narrar capítulo {{ ch.number }}" type="checkbox" name="narrate" value="{{ ch.number }}" {% if ch.narrate %}checked{% endif %}></td>
+<td><a href="{{ url_for('chapter_preview', processing_id=project.processing_id, number=ch.number) }}">Abrir</a></td></tr>{% endfor %}
+</tbody></table></div><p><button name="action" value="save" class="primary-button">Guardar selección</button></p></form>
+<p>Página {{ page }} de {{ pages }}. {% if page > 1 %}<a href="?page={{ page-1 }}&q={{ q | urlencode }}">Anterior</a>{% endif %} {% if page < pages %}<a href="?page={{ page+1 }}&q={{ q | urlencode }}">Siguiente</a>{% endif %}</p>
+</section>
+<section class="panel">
+<form action="{{ url_for('analyze_selection', processing_id=project.processing_id) }}" method="post">
+<label><input type="checkbox" name="use_llm" value="yes" checked> Usar Gemini si está configurado</label>
+<button class="primary-button" {% if busy %}disabled{% endif %}>Analizar capítulos seleccionados pendientes</button></form>
+<p>Los capítulos ya analizados conservan sus correcciones. Para reanalizar uno, abre su vista previa.</p>
+{% if busy %}<p id="book-progress" role="status">Procesamiento en curso…</p>
+<script>const poll = setInterval(async () => { try {const r = await fetch({{ url_for('book_status', processing_id=project.processing_id) | string | tojson }}); const s = await r.json(); document.querySelector('#book-progress').textContent = `Analizados: ${s.analyzed}/${s.total} · Audio: ${s.audio_generated}/${s.total}`; if (!s.busy) {clearInterval(poll); location.reload();}} catch (_) {} }, 2000);</script>{% endif %}
+</section>
+{% endblock %}

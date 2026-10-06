@@ -9,7 +9,7 @@
       <h1>{{ project.analysis.document.title }}</h1>
       <p>{{ project.source_name }} · {{ project.analysis.document.format | upper }}</p>
     </div>
-    <a class="secondary-button" href="{{ url_for('home') }}">Otro documento</a>
+    <a class="secondary-button" href="{{ url_for('book_overview', processing_id=project.processing_id) }}">Capítulos del libro</a>
   </section>
 
   {% if error %}

@@ -2,6 +2,7 @@
 
 import logging
 import tempfile
+from contextlib import asynccontextmanager
 from math import ceil
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from smart_audiobook.application import (
 )
 from smart_audiobook.characters import normalize_character_name
 from smart_audiobook.character_config import CharacterConfig
+from smart_audiobook.models import ChapterStatus
+from smart_audiobook.book_manifest import book_statistics
 from smart_audiobook.document_loaders import DocumentLoadError
 from smart_audiobook.review_service import ReviewService
 from smart_audiobook.review_store import (
@@ -51,7 +54,11 @@ def create_app(
 ) -> FastAPI:
     """Create an injectable web application for production and tests."""
     logging.getLogger("smart_audiobook").setLevel(logging.INFO)
-    app = FastAPI(title="Smart Audiobook", version="0.8.0")
+    @asynccontextmanager
+    async def lifespan(app):
+        app.state.review_service.store.recover_interrupted()
+        yield
+    app = FastAPI(title="Smart Audiobook", version="0.9.0", lifespan=lifespan)
     templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     work_root = (output_root or Path("work")).resolve()
@@ -87,14 +94,17 @@ def create_app(
                 request.app.state.max_upload_size,
             )
             validate_uploaded_content(upload_path)
+            review = request.app.state.review_service
+            # Legacy injected application adapters expose analyze/generate only.
+            importer = review.books.import_book if isinstance(review.application, AudiobookApplicationService) else review.start_analysis
             project = await run_in_threadpool(
-                request.app.state.review_service.start_analysis,
+                importer,
                 upload_path,
                 safe_name,
             )
             return RedirectResponse(
                 request.url_for(
-                    "review_page", processing_id=project.processing_id
+                    "book_overview" if project.imported else "review_page", processing_id=project.processing_id
                 ),
                 status_code=303,
             )
@@ -129,6 +139,101 @@ def create_app(
             await document.close()
             if temporary_directory is not None:
                 temporary_directory.cleanup()
+
+    @app.get("/books/{processing_id}", response_class=HTMLResponse)
+    async def book_overview(request: Request, processing_id: str, q: str = "",
+                            page: int = Query(1, ge=1), estimates: bool = False):
+        project = _load_or_404(request, processing_id)
+        chapters = [ch for ch in project.analysis.document.chapters
+                    if not q or q.casefold() in ch.title.casefold() or q == str(ch.number)]
+        pages = max(1, ceil(len(chapters) / PAGE_SIZE))
+        page = min(page, pages)
+        visible = chapters[(page-1)*PAGE_SIZE:page*PAGE_SIZE]
+        stats = await run_in_threadpool(request.app.state.review_service.books.statistics, processing_id, estimates)
+        return templates.TemplateResponse(request=request, name="book.html", context={
+            "project": project, "chapters": visible, "stats": stats, "q": q, "page": page, "pages": pages,
+            "hidden_chapters": [ch for ch in project.analysis.document.chapters if ch not in visible],
+            "analysis_count": len(project.analysis.chapters),
+            "audio_count": sum(ch.status == ChapterStatus.COMPLETED for ch in project.analysis.document.chapters),
+            "busy": any(ch.status in {ChapterStatus.ANALYZING, ChapterStatus.GENERATING_AUDIO} for ch in project.analysis.document.chapters)})
+
+    @app.get("/books/{processing_id}/status")
+    async def book_status(request: Request, processing_id: str):
+        project = _load_or_404(request, processing_id)
+        return {"analyzed": len(project.analysis.chapters), "total": len(project.analysis.document.chapters),
+            "audio_generated": sum(ch.status == ChapterStatus.COMPLETED for ch in project.analysis.document.chapters),
+            "busy": any(ch.status in {ChapterStatus.ANALYZING, ChapterStatus.GENERATING_AUDIO} for ch in project.analysis.document.chapters),
+            "failed": any(ch.status == ChapterStatus.FAILED for ch in project.analysis.document.chapters)}
+
+    @app.post("/books/{processing_id}/selection")
+    async def select_chapters(request: Request, processing_id: str):
+        project = _load_or_404(request, processing_id)
+        _ensure_idle(project)
+        form = await request.form()
+        try:
+            action = form.get("action", "save")
+            if action == "range":
+                await run_in_threadpool(request.app.state.review_service.books.select_expression, processing_id,
+                    f"{form.get('from', '')}-{form.get('to', '')}")
+            else:
+                numbers = {ch.number for ch in project.analysis.document.chapters} if action == "all" else (
+                    set() if action == "none" else {int(v) for v in form.getlist("chapters")})
+                narrate = None if action in {"all", "none"} else {int(v) for v in form.getlist("narrate")}
+                await run_in_threadpool(request.app.state.review_service.books.select, processing_id, numbers, narrate)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        return RedirectResponse(request.url_for("book_overview", processing_id=processing_id), 303)
+
+    @app.get("/books/{processing_id}/chapters/{number}", response_class=HTMLResponse)
+    async def chapter_preview(request: Request, processing_id: str, number: int):
+        project = _load_or_404(request, processing_id)
+        try:
+            chapter = await run_in_threadpool(request.app.state.review_service.books.preview, processing_id, number)
+        except ReviewStateError as error:
+            raise HTTPException(404, str(error)) from error
+        return templates.TemplateResponse(request=request, name="chapter.html", context={"project": project, "chapter": chapter})
+
+    @app.post("/books/{processing_id}/analyze")
+    async def analyze_selection(request: Request, processing_id: str, background_tasks: BackgroundTasks):
+        project = _load_or_404(request, processing_id)
+        form = await request.form()
+        selected = {ch.number for ch in project.analysis.document.chapters if ch.selected_for_processing and ch.narrate}
+        if not selected:
+            raise HTTPException(400, "Selecciona capítulos para analizar.")
+        if any(ch.status in {ChapterStatus.ANALYZING, ChapterStatus.GENERATING_AUDIO} for ch in project.analysis.document.chapters):
+            raise HTTPException(409, "Ya hay un procesamiento en curso.")
+        from dataclasses import replace
+        project.analysis = replace(project.analysis, document=replace(project.analysis.document,
+            chapters=tuple(replace(ch, status=ChapterStatus.ANALYZING) if ch.number in selected and ch.number not in
+                {a.number for a in project.analysis.chapters} else ch for ch in project.analysis.document.chapters)))
+        request.app.state.review_service.store.save(project)
+        background_tasks.add_task(_analyze_in_background, request.app.state.review_service, processing_id,
+                                  form.get("use_llm") == "yes")
+        return RedirectResponse(request.url_for("book_overview", processing_id=processing_id), 303)
+
+    @app.post("/books/{processing_id}/chapters/{number}/action")
+    async def chapter_action(request: Request, processing_id: str, number: int, background_tasks: BackgroundTasks):
+        project = _load_or_404(request, processing_id)
+        form = await request.form()
+        if number not in {ch.number for ch in project.analysis.document.chapters}:
+            raise HTTPException(404, "Capítulo no válido.")
+        if any(ch.status in {ChapterStatus.ANALYZING, ChapterStatus.GENERATING_AUDIO} for ch in project.analysis.document.chapters):
+            raise HTTPException(409, "Ya hay un procesamiento en curso.")
+        action = form.get("action")
+        if action == "reanalyze":
+            await run_in_threadpool(request.app.state.review_service.books.analyze,
+                processing_id, {number}, reanalyze=True, use_llm=form.get("use_llm") == "yes")
+        elif action == "clear_cache":
+            await run_in_threadpool(request.app.state.review_service.books.clear_chapter_cache, processing_id, number)
+        elif action == "regenerate":
+            if number not in {ch.number for ch in project.analysis.chapters}:
+                raise HTTPException(400, "Analiza primero este capítulo.")
+            _prepare_generation(request, project, {number})
+            background_tasks.add_task(_generate_in_background, request.app.state.review_service, processing_id, {number}, True)
+            return RedirectResponse(request.url_for("generation_page", processing_id=processing_id), 303)
+        else:
+            raise HTTPException(400, "Acción no válida.")
+        return RedirectResponse(request.url_for("book_overview", processing_id=processing_id), 303)
 
     @app.get("/review/{processing_id}", response_class=HTMLResponse)
     async def review_page(
@@ -285,7 +390,13 @@ def create_app(
         processing_id: str,
         background_tasks: BackgroundTasks,
     ):
-        _load_or_404(request, processing_id)
+        project = _load_or_404(request, processing_id)
+        _ensure_idle(project)
+        if project.imported:
+            selected = {ch.number for ch in project.analysis.document.chapters if ch.selected_for_processing and ch.narrate}
+            if not selected or not selected.issubset({ch.number for ch in project.analysis.chapters}):
+                raise HTTPException(400, "Analiza primero los capítulos seleccionados.")
+            _prepare_generation(request, project, selected)
         background_tasks.add_task(
             _generate_in_background,
             request.app.state.review_service,
@@ -348,11 +459,8 @@ def create_app(
                 "title": chapter.title,
                 "filename": audio_path.name,
             }
-            for chapter, audio_path in zip(
-                project.analysis.chapters,
-                project.output.chapter_files,
-                strict=True,
-            )
+            for audio_path in project.output.chapter_files
+            for chapter in project.analysis.chapters if audio_path.name.startswith(f"{chapter.number:02d}_")
         ]
         return templates.TemplateResponse(
             request=request,
@@ -384,9 +492,23 @@ def create_app(
     return app
 
 
-def _generate_in_background(service: ReviewService, processing_id: str) -> None:
+def _analyze_in_background(service: ReviewService, processing_id: str, use_llm: bool) -> None:
     try:
-        service.generate(processing_id)
+        service.books.analyze(processing_id, use_llm=use_llm)
+    except Exception:
+        LOGGER.exception("Chapter analysis failed")
+        from dataclasses import replace
+        project = service.load(processing_id)
+        project.analysis = replace(project.analysis, document=replace(project.analysis.document,
+            chapters=tuple(replace(ch, status=ChapterStatus.FAILED) if ch.status == ChapterStatus.ANALYZING else ch
+                           for ch in project.analysis.document.chapters)))
+        service.store.save(project)
+
+
+def _generate_in_background(service: ReviewService, processing_id: str,
+                            numbers: set[int] | None = None, force: bool = False) -> None:
+    try:
+        service.generate(processing_id, numbers, force)
     except Exception as error:
         LOGGER.exception("Background audio generation failed")
         path = service.store.directory(processing_id) / "generation_state.json"
@@ -453,6 +575,21 @@ def _load_or_404(request: Request, processing_id: str) -> ReviewProject:
         return request.app.state.review_service.load(processing_id)
     except ReviewStateError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+def _ensure_idle(project: ReviewProject) -> None:
+    if any(ch.status in {ChapterStatus.ANALYZING, ChapterStatus.GENERATING_AUDIO}
+           for ch in project.analysis.document.chapters):
+        raise HTTPException(409, "Ya hay un procesamiento en curso.")
+
+
+def _prepare_generation(request: Request, project: ReviewProject, numbers: set[int]) -> None:
+    from dataclasses import replace
+    project.output = None
+    project.analysis = replace(project.analysis, document=replace(project.analysis.document,
+        chapters=tuple(replace(ch, status=ChapterStatus.GENERATING_AUDIO) if ch.number in numbers else ch
+                       for ch in project.analysis.document.chapters)))
+    request.app.state.review_service.store.save(project)
 
 
 def _review_response(

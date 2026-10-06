@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="result-heading"><div><p class="eyebrow">IMPORT PREVIEW</p><h1>{{ chapter.number }} · {{ chapter.title }}</h1><p>{{ chapter.word_count }} palabras · {{ chapter.status.value }}</p><p>Origen: {{ chapter.source_reference or 'No disponible en el proyecto antiguo' }}</p></div>
+<a class="secondary-button" href="{{ url_for('book_overview', processing_id=project.processing_id) }}">Volver al libro</a></section>
+<section class="panel"><h2>Limpieza aplicada</h2>{% for note in chapter.cleaning_notes %}<p>{{ note }}</p>{% else %}<p>Normalización conservadora de Unicode y espacios.</p>{% endfor %}
+<h2>Texto extraído</h2><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ chapter.text }}</pre>
+<details><summary>Texto anterior a la limpieza</summary><pre style="white-space:pre-wrap">{{ chapter.raw_text or chapter.text }}</pre></details>
+{% if chapter.blocks %}<details><summary>Énfasis y separadores conservados</summary>{% for block in chapter.blocks if block.emphasis or block.scene_break %}<p>{{ block.text }} · {{ block.emphasis | join(', ') }}{% if block.scene_break %} · scene break{% endif %}</p>{% endfor %}</details>{% endif %}</section>
+<section class="panel"><h2>Procesar solo este capítulo</h2><form action="{{ url_for('chapter_action', processing_id=project.processing_id, number=chapter.number) }}" method="post">
+<p><label><input type="checkbox" name="use_llm" value="yes" checked> Usar Gemini si está configurado</label></p>
+<button name="action" value="reanalyze" class="small-button">Reanalizar speakers</button>
+<button name="action" value="regenerate" class="small-button">Regenerar audio</button>
+<button name="action" value="clear_cache" class="small-button">Limpiar caché de este capítulo</button>
+</form><p>El reanálisis conserva las correcciones manuales. Las posibles inconsistencias posteriores se marcan para revisión.</p></section>
+{% endblock %}
