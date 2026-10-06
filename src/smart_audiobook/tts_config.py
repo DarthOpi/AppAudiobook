@@ -21,6 +21,7 @@ class TTSConfig:
     paragraph_pause_ms: int = 320
     speaker_change_pause_ms: int = 260
     chapter_pause_ms: int = 700
+    scene_break_pause_ms: int = 1000
 
     @classmethod
     def from_environment(cls, provider_override: str | None = None) -> "TTSConfig":
@@ -40,6 +41,7 @@ class TTSConfig:
                 paragraph_pause_ms=int(os.getenv("TTS_PARAGRAPH_PAUSE_MS", "320")),
                 speaker_change_pause_ms=int(os.getenv("TTS_SPEAKER_CHANGE_PAUSE_MS", "260")),
                 chapter_pause_ms=int(os.getenv("TTS_CHAPTER_PAUSE_MS", "700")),
+                scene_break_pause_ms=int(os.getenv("TTS_SCENE_BREAK_PAUSE_MS", "1000")),
             )
         except ValueError as error:
             raise SpeechGenerationError(
@@ -58,6 +60,7 @@ class TTSConfig:
                 config.paragraph_pause_ms,
                 config.speaker_change_pause_ms,
                 config.chapter_pause_ms,
+                config.scene_break_pause_ms,
             )
         ):
             raise SpeechGenerationError("Las pausas TTS no pueden ser negativas.")

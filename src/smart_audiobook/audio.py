@@ -32,12 +32,14 @@ class PauseSettings:
     segment_ms: int = 180
     paragraph_ms: int = 320
     speaker_change_ms: int = 260
+    scene_break_ms: int = 1000
 
     def as_dict(self) -> dict[str, int]:
         return {
             "segment_ms": self.segment_ms,
             "paragraph_ms": self.paragraph_ms,
             "speaker_change_ms": self.speaker_change_ms,
+            "scene_break_ms": self.scene_break_ms,
         }
 
 
@@ -75,7 +77,9 @@ def generate_audiobook(
         for part_index, part in enumerate(parts):
             pause_ms = 0
             if chunks:
-                if part_index:
+                if segment.scene_break_before and not part_index:
+                    pause_ms = pauses.scene_break_ms
+                elif part_index:
                     pause_ms = pauses.paragraph_ms if "\n\n" in segment.text else pauses.segment_ms
                 elif previous is not None and previous.speaker != segment.speaker:
                     pause_ms = pauses.speaker_change_ms

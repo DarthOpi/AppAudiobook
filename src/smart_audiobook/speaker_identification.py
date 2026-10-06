@@ -78,11 +78,23 @@ class SpeakerIdentificationService:
         before = tuple(s for s in segments[max(0, index-self._context_window):index] if s.chapter == current.chapter)
         after = tuple(replace(s, speaker=UNKNOWN_SPEAKER if s.type == "dialogue" else NARRATOR)
                       for s in segments[index+1:index+self._context_window+1] if s.chapter == current.chapter)
+        boundary = next((i for i in range(len(before)-1, -1, -1) if before[i].scene_break_before), None)
+        if current.scene_break_before:
+            before = ()
+        elif boundary is not None:
+            before = before[boundary:]
+        next_boundary = next((i for i, segment in enumerate(after) if segment.scene_break_before), len(after))
+        after = after[:next_boundary]
         previous = tuple(s.speaker for s in segments[max(0, index-8):index]
                          if s.chapter == current.chapter and s.type == "dialogue"
                          and s.speaker not in {NARRATOR, UNKNOWN_SPEAKER})
+        active = registry.active_characters(chapter, current.order, self.config.active_window)
+        if current.scene_break_before or boundary is not None:
+            previous = tuple(s.speaker for s in before if s.type == "dialogue" and s.speaker not in {NARRATOR, UNKNOWN_SPEAKER})
+            scene_names = {s.speaker for s in before} | set(registry.mentions(" ".join(s.text for s in before), chapter))
+            active = tuple(name for name in active if name in scene_names)
         context = SpeakerContext(current, before, after, (),
-            active_characters=registry.active_characters(chapter, current.order, self.config.active_window),
+            active_characters=active,
             previous_speakers=previous, chapter=chapter)
         candidates = candidate_speakers(context, registry, self.config.candidate_limit)
         aliases = tuple((name, alias.name, alias.known_from_chapter)
