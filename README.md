@@ -595,7 +595,7 @@ La suite cubre el pipeline anterior y la web, Character Intelligence, EPUBs pequ
 - La extracción PDF depende de cómo esté construido el documento y puede alterar el orden de maquetaciones complejas.
 - Las tablas e imágenes DOCX no se narran.
 - Las heurísticas pueden detectar de más o de menos en novelas con encabezados no convencionales.
-- Solo se detectan diálogos con raya larga; las comillas aún no se tratan como diálogo.
+- Diálogos con raya y comillas dobles; comillas simples como pensamientos. Citas no habladas o convenciones distintas pueden necesitar revisión.
 - Las reglas de hablante cubren un conjunto limitado de verbos de habla en español.
 - Si faltan voces, se reutilizan de forma cíclica.
 - La generación web usa una tarea local y polling; no es una cola distribuida. Tras reiniciar la aplicación hay que iniciar de nuevo la acción, que continúa desde caché/estado.
@@ -604,3 +604,115 @@ La suite cubre el pipeline anterior y la web, Character Intelligence, EPUBs pequ
 - No hay autenticación ni separación entre usuarios; V0.7 está pensada para uso local.
 - La salida de audio de V0.7 es WAV, no MP3.
 - La variedad y expresividad dependen del modelo Piper elegido; V0.7 no infiere edad, género ni estilos interpretativos.
+
+## Corrección de calidad para novelas (V0.9)
+
+El PDF ahora pasa por `PdfTextReconstructor` antes de construir bloques y capítulos.
+Se unen líneas incompletas de maquetación, respetando párrafos explícitos, encabezados,
+rayas, pensamientos y separadores de escena. La reconstrucción es heurística: un PDF
+sin coordenadas o con columnas puede seguir necesitando revisión. Las entradas del
+índice con puntos guía ya no se interpretan como comienzos de capítulo.
+
+El análisis distingue `narration`, `dialogue` e `internal_thought`; `system_message`
+queda reservado, sin detección automática. Los dos últimos tipos resolubles conservan
+`context_before`/`context_after`. `Narrator` solo representa narración. Las atribuciones
+anteriores y posteriores, incluida «Daniel se volvió y preguntó:», se resuelven antes
+del LLM. Referencias indirectas pasan a Gemini; nombres nuevos inferidos siguen como
+candidatos pendientes hasta confirmación. Una autoidentificación explícita en el texto
+puede validar ese nombre, pero no fusiona automáticamente otras identidades anteriores.
+
+La revisión muestra conteos de narración/diálogo/pensamiento, reglas/LLM/manual/Unknown,
+personajes, llamadas reales a Gemini, errores y respuestas rechazadas. Los fallos no
+se cachean; las respuestas válidas y la versión del prompt sí. Las ventanas son del
+mismo capítulo y respetan escenas y aliases temporales. Las correcciones manuales
+se conservan. Se usa `GEMINI_API_KEY`; `GEMINI_MODEL` permite cambiar el modelo localmente.
+Los logs no imprimen claves ni prompts completos.
+
+### Probar sin procesar una novela entera
+
+Desde la raíz del repositorio, con el entorno habitual activado:
+
+```powershell
+python -m pytest -q
+python examples/verify_novel_sample.py "ruta\novela.pdf" --start-page 9 --pages 2
+python examples/verify_novel_sample.py "ruta\novela.pdf" --start-page 9 --pages 2 --llm --max-llm-calls 3
+```
+
+La última orden hace llamadas reales usando `.env` y envía solo contexto compacto de
+las páginas elegidas a Google. No genera audio ni modifica el proyecto original.
+El script limita páginas y llamadas y se detiene ante el primer fallo del proveedor.
+`examples/diagnose_novel.py` inspecciona extracción y catálogo sin red.
+
+En la web: reinicia el servidor, importa `tests/fixtures/novel_regression.txt`, analiza
+su capítulo y abre **Revisar personajes**. Deben aparecer Daniel, Elena, pensamientos
+y Unknown separados del narrador. Allí están las métricas, filtros y previews de voz.
+
+**Proyectos previamente analizados:** cargar no transforma silenciosamente segmentos
+ni modifica correcciones. Los campos nuevos usan defaults. Reanalizar Unknown usa la
+segmentación guardada; no repara la extracción anterior. Para aplicar la reconstrucción
+PDF y nueva segmentación, importa el documento como un proyecto nuevo y selecciona un
+rango pequeño. Conserva el proyecto anterior como referencia para trasladar correcciones.
+
+### Voces reales y perfiles
+
+`VoiceInfo` describe una voz real del motor. `CharacterVoiceProfile` define una
+configuración reutilizable: ID, nombre, proveedor, voz base, idioma, referencia local,
+metadata, estrategia y ajustes. `ProfiledTTSProvider` combina ambas en el catálogo y
+las integra con previews, asignación determinista y caché de audio existente. Las
+elecciones manuales tienen prioridad; personajes importantes prefieren voces dedicadas
+y los menores perfiles de pool. No se inventan género ni edad.
+
+La instalación examinada tiene **4 identidades españolas de Piper, en 3 modelos**.
+Piper no soporta reference conditioning ni estilos dramáticos; cambiar velocidad o
+volumen no crea una identidad nueva. Este catálogo no basta como motor principal para
+una novela con muchos personajes expresivos. Sigue disponible por su ligereza.
+
+Para configurar un pool sobre una voz Piper existente, copia
+`examples/voice_profiles.example.json` a `voices/profiles.json` y configura:
+
+```dotenv
+VOICE_PROFILES_FILE=voices/profiles.json
+```
+
+Esto añade un perfil, **no** una quinta identidad real. El catálogo web refresca voces
+disponibles al abrir un proyecto; muestra proveedor, idioma, género si consta, búsqueda
+y filtros. Cada voz/perfil seleccionado puede escucharse mediante **Preview**.
+
+### Alternativa opcional: Chatterbox Multilingual
+
+Se incluye un adaptador local opcional, sin reemplazar Piper ni descargar modelos.
+[Chatterbox Multilingual](https://github.com/resemble-ai/chatterbox) soporta español,
+referencias para acondicionar la identidad, CPU y CUDA. Es más pesado; CPU puede ser
+lento para audiolibros largos. Su proyecto recomienda Python 3.11; no presupongas que
+sus dependencias funcionan en el entorno Python 3.14 utilizado para Piper.
+
+En un entorno **separado** compatible, instala el proyecto con
+`python -m pip install -e ".[web,llm,reference-tts]"`. Obtén los pesos de la fuente
+oficial y revisa licencia y requisitos siguiendo sus instrucciones. Para usar el
+adaptador, configura un directorio de pesos **locales** y referencias propias:
+
+```dotenv
+TTS_PROVIDER=chatterbox
+CHATTERBOX_MODEL_DIR=voices/chatterbox
+CHATTERBOX_DEVICE=cpu
+CHATTERBOX_T3_MODEL=v2
+VOICE_PROFILES_FILE=voices/reference_profiles.json
+HF_HUB_OFFLINE=1
+TRANSFORMERS_OFFLINE=1
+```
+
+V2 conserva compatibilidad con releases anteriores; V3 requiere un SDK que admita
+`from_local(..., t3_model="v3")` y sus pesos correspondientes. El catálogo no carga
+Torch; los modelos solo se cargan al sintetizar. El adaptador llama a `from_local`,
+no a `from_pretrained`; los modos offline evitan descargas implícitas de dependencias.
+
+Adapta `examples/reference_profiles.example.json` en `voices/`. Coloca WAVs propios,
+sintéticos o autorizados de hasta 20 MB, rutas relativas al JSON; marca
+`consent_confirmed=true` **solo cuando exista autorización**. No se incluyen referencias
+de personas ni grabaciones de terceros. `style` admite `neutral`/`expressive`, no
+speed/pitch. Cambiar contenido de una referencia invalida la caché correspondiente.
+
+No se han instalado ni probado acústicamente pesos reales de Chatterbox en este equipo.
+Los tests mockean el motor y usan WAVs sintéticos; validan integración, no calidad de
+voz. Hasta aportar pesos y referencias válidas seguirás viendo las cuatro voces Piper.
+Consulta el diagnóstico y archivos de esta corrección en [docs/novel-quality.md](docs/novel-quality.md).

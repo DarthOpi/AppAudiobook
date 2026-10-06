@@ -1,0 +1,12 @@
+[
+  {
+    "id": "profile:neutral_pool_01",
+    "name": "Neutral pool · Carlfm",
+    "provider": "piper",
+    "base_voice_id": "es_ES-carlfm-x_low.onnx",
+    "language": "es_ES",
+    "strategy": "generic_pool",
+    "settings": {"speed": 0.95},
+    "metadata": {"note": "Same Piper vocal identity, not another speaker embedding."}
+  }
+]

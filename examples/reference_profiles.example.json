@@ -1,0 +1,13 @@
+[
+  {
+    "id": "profile:own_reference_01",
+    "name": "Mi referencia autorizada 01",
+    "provider": "chatterbox",
+    "base_voice_id": "chatterbox:default",
+    "reference_audio": "references/own_voice_01.wav",
+    "language": "es",
+    "strategy": "dedicated",
+    "settings": {"style": "expressive"},
+    "metadata": {"consent_confirmed": false, "note": "Set true only for your own, synthetic or explicitly authorized recording."}
+  }
+]
