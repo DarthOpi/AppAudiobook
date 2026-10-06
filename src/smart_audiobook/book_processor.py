@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -33,7 +33,8 @@ from smart_audiobook.tts_providers import (
     provider_id,
     provider_model,
 )
-from smart_audiobook.voice_assignment import assign_voices
+from smart_audiobook.voice_assignment import assign_voices, assign_profile_voices
+from smart_audiobook.character_config import CharacterConfig
 
 LOGGER = logging.getLogger(__name__)
 StateCallback = Callable[[dict[str, Any]], None]
@@ -52,6 +53,13 @@ class BookAnalysis:
     document: Document
     chapters: tuple[AnalyzedChapter, ...]
     characters: tuple[str, ...]
+    registry: CharacterRegistry = field(default_factory=CharacterRegistry)
+    resolution_cache: dict[str, dict | None] = field(default_factory=dict)
+    llm_calls_saved: int = 0
+
+    def __post_init__(self) -> None:
+        for name in self.characters:
+            self.registry.register(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,9 +80,8 @@ def analyze_book(
     analyzed_chapters: list[AnalyzedChapter] = []
     global_order = 0
     for chapter in document.chapters:
-        analysis = speaker_service.identify(segment_text(chapter.text), registry=registry)
         indexed_segments = []
-        for segment in analysis.segments:
+        for segment in segment_text(chapter.text):
             global_order += 1
             indexed_segments.append(
                 replace(
@@ -84,10 +91,12 @@ def analyze_book(
                     order=global_order,
                 )
             )
+        analysis = speaker_service.identify(indexed_segments, registry=registry)
         analyzed_chapters.append(
-            AnalyzedChapter(chapter.number, chapter.title, tuple(indexed_segments))
+            AnalyzedChapter(chapter.number, chapter.title, analysis.segments)
         )
-    return BookAnalysis(document, tuple(analyzed_chapters), registry.characters)
+    return BookAnalysis(document, tuple(analyzed_chapters), registry.characters,
+                        registry, speaker_service.resolution_cache, speaker_service.llm_calls_saved)
 
 
 def generate_book(
@@ -133,8 +142,18 @@ def generate_book(
     if not voice_ids:
         raise SpeechGenerationError("No se encontraron voces instaladas.")
     if voices_by_speaker is None:
-        voices_by_speaker = assign_voices(all_segments, voice_ids)
+        analysis.registry.rebuild_statistics(all_segments)
+        if tts_provider is not None:
+            voices_by_speaker = assign_profile_voices(analysis.registry, provider.list_voices())
+            if any(s.speaker == "Unknown" for s in all_segments):
+                voices_by_speaker.setdefault("Unknown", voice_ids[-1])
+        else:
+            voices_by_speaker = assign_voices(all_segments, voice_ids)
     _validate_assignments(all_segments, voices_by_speaker, voice_ids)
+    for name, voice_id in voices_by_speaker.items():
+        profile = analysis.registry.find(name)
+        if profile:
+            profile.voice_id = voice_id
     chapter_chunk_counts = {
         chapter.number: sum(
             len(chunk_text(segment.text, config.chunk_max_chars))
@@ -273,6 +292,8 @@ def generate_book(
             "chapter_count": len(analysis.chapters),
             "detected_characters": list(analysis.characters),
             "voice_assignments": dict(voices_by_speaker),
+            "character_intelligence": character_metrics(analysis),
+            "character_profiles": analysis.registry.to_list(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source": analysis.document.source_path.name,
             "generation": {
@@ -299,6 +320,24 @@ def generate_book(
         voice_assignments=dict(voices_by_speaker),
         generation_state=state_path,
     )
+
+
+def character_metrics(analysis: BookAnalysis) -> dict[str, int]:
+    threshold = CharacterConfig.from_environment().accept_confidence
+    dialogues = [s for ch in analysis.chapters for s in ch.segments if s.type == "dialogue"]
+    profiles = [p for p in analysis.registry.profiles if p.canonical_name != "Narrator"]
+    return {
+        "speakers_resolved_by_rules": sum(s.resolution_method in {"rule", "conversation", "candidate"} for s in dialogues),
+        "speakers_resolved_by_llm": sum(s.resolution_method == "llm" and s.speaker != "Unknown" for s in dialogues),
+        "speakers_resolved_manually": sum(s.resolution_method == "manual" for s in dialogues),
+        "unresolved_segments": sum(s.speaker == "Unknown" for s in dialogues),
+        "low_confidence_segments": sum(s.confidence is not None and s.confidence < threshold for s in dialogues),
+        "characters_total": len(profiles),
+        "major_characters": sum(p.importance == "major" for p in profiles),
+        "supporting_characters": sum(p.importance == "supporting" for p in profiles),
+        "minor_characters": sum(p.importance == "minor" for p in profiles),
+        "llm_calls_saved": analysis.llm_calls_saved,
+    }
 
 
 def request_cancellation(state_path: Path) -> None:

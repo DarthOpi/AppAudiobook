@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from smart_audiobook.application import AudiobookApplicationService
-from smart_audiobook.book_processor import BookAnalysis
+from smart_audiobook.book_processor import BookAnalysis, character_metrics
 from smart_audiobook.document_loaders import DocumentLoadError
 from smart_audiobook.tts import SpeechGenerationError
 from smart_audiobook.tts_config import TTSConfig, build_tts_provider
@@ -60,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignora la caché de audio y vuelve a sintetizar todo.",
     )
+    parser.add_argument("--show-characters", action="store_true", help="Muestra perfiles de personajes.")
+    parser.add_argument("--character-stats", action="store_true", help="Muestra métricas de personajes.")
+    parser.add_argument("--project-id", help="UUID de un proyecto existente bajo work/.")
+    parser.add_argument("--reanalyze-unresolved", action="store_true", help="Reanaliza Unknown del proyecto indicado.")
     return parser
 
 
@@ -70,6 +74,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         service = AudiobookApplicationService()
+        if args.project_id:
+            from smart_audiobook.review_store import ReviewProjectStore
+            from smart_audiobook.review_service import ReviewService
+            from smart_audiobook.tts_providers import SystemTTSProvider
+            review = ReviewService(ReviewProjectStore(Path("work")), SystemTTSProvider())
+            project = (review.reanalyze(args.project_id, speaker_service=service._speaker_service_factory(not args.no_llm))
+                       if args.reanalyze_unresolved else review.load(args.project_id))
+            _print_analysis(project.analysis)
+            return 0
+        if args.reanalyze_unresolved:
+            raise ValueError("--reanalyze-unresolved requiere --project-id.")
         if args.analyze_only:
             analysis = service.analyze(
                 args.input,
@@ -92,9 +107,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume=not args.no_resume,
             force_regenerate=args.force_regenerate,
         )
-        if args.show_segments:
+        if args.show_segments or args.show_characters or args.character_stats:
             _print_analysis(result.analysis)
-    except (DocumentLoadError, SpeechGenerationError) as error:
+    except (DocumentLoadError, SpeechGenerationError, ValueError) as error:
         print(f"Error: {error}")
         return 1
 
@@ -124,6 +139,8 @@ def _print_analysis(analysis: BookAnalysis) -> None:
                     for chapter in analysis.chapters
                 ],
                 "characters": list(analysis.characters),
+                "character_profiles": analysis.registry.to_list(),
+                "character_metrics": character_metrics(analysis),
             },
             ensure_ascii=False,
             indent=2,

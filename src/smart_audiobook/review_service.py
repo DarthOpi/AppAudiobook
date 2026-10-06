@@ -11,7 +11,7 @@ from typing import Protocol
 from smart_audiobook.application import AudiobookApplicationService, ProcessingResult
 from smart_audiobook.audio_cache import AudioCache
 from smart_audiobook.book_processor import AnalyzedChapter, BookAnalysis
-from smart_audiobook.characters import normalize_character_name
+from smart_audiobook.characters import normalize_character_name, CharacterRegistry
 from smart_audiobook.models import NARRATOR, UNKNOWN_SPEAKER, TextSegment
 from smart_audiobook.review_store import (
     ReviewProject,
@@ -25,7 +25,7 @@ from smart_audiobook.tts_providers import (
     provider_id,
     provider_model,
 )
-from smart_audiobook.voice_assignment import assign_voices
+from smart_audiobook.voice_assignment import assign_voices, assign_profile_voices
 
 PREVIEW_TEXT = "Hola. Esta es una prueba de mi voz para el audiolibro."
 LOGGER = logging.getLogger(__name__)
@@ -78,10 +78,10 @@ class ReviewService:
             except SpeechGenerationError as error:
                 LOGGER.warning("Voice catalog is unavailable: %s", error)
                 voices = ()
-            assignments = assign_voices(
-                _all_segments(analysis),
-                [voice.id for voice in voices],
-            )
+            analysis.registry.rebuild_statistics(_all_segments(analysis))
+            assignments = assign_profile_voices(analysis.registry, voices)
+            if any(s.speaker == UNKNOWN_SPEAKER for s in _all_segments(analysis)) and voices:
+                assignments[UNKNOWN_SPEAKER] = voices[-1].id
             project = ReviewProject(
                 processing_id=processing_id,
                 source_name=source_name,
@@ -111,6 +111,12 @@ class ReviewService:
             if requested is None:
                 continue
             canonical = _canonical_name(requested, known)
+            profile = project.analysis.registry.find(canonical)
+            if profile:
+                profile.pending = False
+                canonical = profile.canonical_name
+            elif canonical != UNKNOWN_SPEAKER:
+                canonical = project.analysis.registry.register(canonical, segment.chapter)
             if canonical not in known:
                 known.append(canonical)
             changed[segment.id] = canonical
@@ -132,6 +138,10 @@ class ReviewService:
             raise ReviewStateError("Narrator y Unknown no se pueden renombrar.")
         current = _find_character(project.characters, current_name)
         target = _canonical_name(new_name, list(project.characters), exclude=current)
+        try:
+            project.analysis.registry.rename(current, target)
+        except ValueError as error:
+            raise ReviewStateError(str(error)) from error
         project.analysis = _replace_character(project.analysis, current, target)
         project.analysis = _with_rebuilt_characters(project.analysis)
         _move_voice_assignment(project, current, target)
@@ -144,6 +154,7 @@ class ReviewService:
         processing_id: str,
         source_name: str,
         target_name: str,
+        known_from: int = 1,
     ) -> ReviewProject:
         project = self.load(processing_id)
         if source_name in {NARRATOR, UNKNOWN_SPEAKER}:
@@ -152,6 +163,10 @@ class ReviewService:
         target = _find_character(project.characters, target_name)
         if normalize_character_name(source) == normalize_character_name(target):
             raise ReviewStateError("Selecciona dos personajes diferentes.")
+        try:
+            project.analysis.registry.merge(source, target, known_from)
+        except ValueError as error:
+            raise ReviewStateError(str(error)) from error
         project.analysis = _replace_character(project.analysis, source, target)
         project.analysis = _with_rebuilt_characters(project.analysis)
         _move_voice_assignment(project, source, target)
@@ -170,7 +185,76 @@ class ReviewService:
         if voice_id not in {voice.id for voice in project.voices}:
             raise ReviewStateError("La voz seleccionada no está disponible.")
         project.voice_assignments[canonical] = voice_id
+        profile = project.analysis.registry.find(canonical)
+        if profile:
+            profile.voice_id, profile.voice_manual = voice_id, True
+            profile.voice_strategy = "dedicated"
         project.output = None
+        self.store.save(project)
+        return project
+
+    def edit_alias(self, processing_id: str, character: str, alias: str,
+                   known_from: int = 1, remove: bool = False) -> ReviewProject:
+        project = self.load(processing_id)
+        try:
+            if remove:
+                project.analysis.registry.remove_alias(character, alias)
+            else:
+                project.analysis.registry.add_alias(character, alias, known_from)
+        except ValueError as error:
+            raise ReviewStateError(str(error)) from error
+        self.store.save(project)
+        return project
+
+    def reanalyze(self, processing_id: str, selected_ids: set[str] | None = None,
+                  low_confidence: bool = False, speaker_service=None) -> ReviewProject:
+        from smart_audiobook.application import _build_speaker_service
+        project = self.load(processing_id)
+        ids = selected_ids if selected_ids is not None else {
+            s.id for s in project.dialogues if s.speaker == UNKNOWN_SPEAKER
+            or (low_confidence and s.review_needed)
+        }
+        valid = {s.id for s in project.dialogues}
+        if not ids.issubset(valid):
+            raise ReviewStateError("Segmento no válido.")
+        service = speaker_service or _build_speaker_service(True)
+        saved_before = service.llm_calls_saved
+        service.resolution_cache.update(project.analysis.resolution_cache)
+        registry = CharacterRegistry.from_list(project.analysis.registry.to_list())
+        for p in registry.profiles:
+            p.activity = []  # reconstruct only past activity while walking the book
+        chapters = tuple(replace(ch, segments=service.identify(ch.segments, registry, ids).segments)
+                         for ch in project.analysis.chapters)
+        registry.rebuild_statistics(s for ch in chapters for s in ch.segments)
+        project.analysis = replace(project.analysis, chapters=chapters, registry=registry,
+            characters=registry.characters, resolution_cache=service.resolution_cache,
+            llm_calls_saved=project.analysis.llm_calls_saved + service.llm_calls_saved - saved_before)
+        _complete_voice_assignments(project)
+        project.output = None
+        self.store.save(project)
+        return project
+
+    def enrich_character(self, processing_id: str, character: str, chapter: int,
+                          resolver=None) -> ReviewProject:
+        """Explicit, optional enrichment; suggestions never become aliases automatically."""
+        from smart_audiobook.gemini_resolver import build_gemini_resolver_from_environment
+        project = self.load(processing_id)
+        profile = project.analysis.registry.require(character)
+        evidence = [s.text[:300] for s in project.segments if s.chapter <= chapter
+                    and (s.speaker == profile.canonical_name or profile.canonical_name in
+                         project.analysis.registry.mentions(s.text, s.chapter))][-8:]
+        if len(evidence) < 3:
+            raise ReviewStateError("Se necesitan al menos tres fragmentos de evidencia.")
+        resolver = resolver or build_gemini_resolver_from_environment()
+        if resolver is None or not hasattr(resolver, "enrich"):
+            raise ReviewStateError("LLM no configurado para enriquecimiento.")
+        data = resolver.enrich(profile.canonical_name, evidence, chapter)
+        if not data:
+            raise ReviewStateError("No se recibió un perfil válido.")
+        profile.description = data["description"]
+        profile.personality_traits = data["personality_traits"]
+        profile.knowledge["description"] = chapter
+        profile.knowledge["personality_traits"] = chapter
         self.store.save(project)
         return project
 
@@ -295,6 +379,8 @@ def _replace_segment_speakers(
                     speaker=changes[segment.id],
                     confidence=1.0,
                     resolution_method="manual",
+                    review_needed=False,
+                    new_character_candidate=None,
                 )
                 if segment.id in changes
                 else segment
@@ -335,14 +421,19 @@ def _with_rebuilt_characters(
             continue
         seen.add(key)
         ordered.append(name)
-    return replace(analysis, characters=tuple(ordered))
+    for name in ordered:
+        analysis.registry.register(name)
+    return replace(analysis, characters=analysis.registry.characters)
 
 
 def _complete_voice_assignments(project: ReviewProject) -> None:
     voice_ids = [voice.id for voice in project.voices]
     if not voice_ids:
         return
-    automatic = assign_voices(project.segments, voice_ids)
+    project.analysis.registry.rebuild_statistics(project.segments)
+    automatic = assign_profile_voices(project.analysis.registry, project.voices, project.voice_assignments)
+    if any(s.speaker == UNKNOWN_SPEAKER for s in project.segments):
+        automatic.setdefault(UNKNOWN_SPEAKER, voice_ids[-1])
     for character, voice_id in automatic.items():
         project.voice_assignments.setdefault(character, voice_id)
 
@@ -355,4 +446,7 @@ def _move_voice_assignment(
     source_voice = project.voice_assignments.pop(source, None)
     if source_voice is not None:
         project.voice_assignments.setdefault(target, source_voice)
+    profile = project.analysis.registry.find(target)
+    if profile and profile.voice_manual and profile.voice_id:
+        project.voice_assignments[target] = profile.voice_id
     _complete_voice_assignments(project)
