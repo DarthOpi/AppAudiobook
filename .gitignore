@@ -27,6 +27,9 @@ output/*
 !output/.gitkeep
 work/*
 !work/.gitkeep
+voices/
+.audio-cache/
+**/.audio-cache/
 
 # Editors and operating systems
 .idea/
