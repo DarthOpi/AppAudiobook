@@ -5,8 +5,8 @@ import tempfile
 from math import ceil
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -24,7 +24,8 @@ from smart_audiobook.review_store import (
     ReviewStateError,
 )
 from smart_audiobook.tts import SpeechGenerationError
-from smart_audiobook.tts_providers import LocalTTSProvider, TTSProvider
+from smart_audiobook.tts_config import build_tts_provider
+from smart_audiobook.tts_providers import TTSProvider
 from smart_audiobook.web_security import (
     MAX_UPLOAD_SIZE,
     UploadValidationError,
@@ -49,11 +50,11 @@ def create_app(
 ) -> FastAPI:
     """Create an injectable web application for production and tests."""
     logging.getLogger("smart_audiobook").setLevel(logging.INFO)
-    app = FastAPI(title="Smart Audiobook", version="0.6.0")
+    app = FastAPI(title="Smart Audiobook", version="0.7.0")
     templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     work_root = (output_root or Path("work")).resolve()
-    provider = tts_provider or LocalTTSProvider()
+    provider = tts_provider or build_tts_provider()
     app.state.review_service = review_service or ReviewService(
         ReviewProjectStore(work_root),
         provider,
@@ -240,23 +241,59 @@ def create_app(
         )
 
     @app.post("/review/{processing_id}/generate")
-    async def generate_audiobook(request: Request, processing_id: str):
-        project = _load_or_404(request, processing_id)
-        try:
-            await run_in_threadpool(
-                request.app.state.review_service.generate,
-                processing_id,
-            )
-        except SpeechGenerationError as error:
-            return _review_response(
-                templates,
-                request,
-                project,
-                error=str(error),
-                status_code=422,
-            )
+    async def generate_audiobook(
+        request: Request,
+        processing_id: str,
+        background_tasks: BackgroundTasks,
+    ):
+        _load_or_404(request, processing_id)
+        background_tasks.add_task(
+            _generate_in_background,
+            request.app.state.review_service,
+            processing_id,
+        )
         return RedirectResponse(
-            request.url_for("result_page", processing_id=processing_id),
+            request.url_for("generation_page", processing_id=processing_id),
+            status_code=303,
+        )
+
+    @app.get("/generation/{processing_id}", response_class=HTMLResponse)
+    async def generation_page(request: Request, processing_id: str):
+        project = _load_or_404(request, processing_id)
+        if project.output is not None:
+            return RedirectResponse(
+                request.url_for("result_page", processing_id=processing_id),
+                status_code=303,
+            )
+        return templates.TemplateResponse(
+            request=request,
+            name="generation.html",
+            context={
+                "project": project,
+                "status": request.app.state.review_service.generation_status(
+                    processing_id
+                ),
+            },
+        )
+
+    @app.get("/generation/{processing_id}/status")
+    async def generation_status(request: Request, processing_id: str) -> JSONResponse:
+        try:
+            status = request.app.state.review_service.generation_status(processing_id)
+        except ReviewStateError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        project = request.app.state.review_service.load(processing_id)
+        status["result_ready"] = project.output is not None
+        return JSONResponse(status)
+
+    @app.post("/generation/{processing_id}/cancel")
+    async def cancel_generation(request: Request, processing_id: str):
+        try:
+            request.app.state.review_service.cancel_generation(processing_id)
+        except ReviewStateError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return RedirectResponse(
+            request.url_for("generation_page", processing_id=processing_id),
             status_code=303,
         )
 
@@ -306,6 +343,26 @@ def create_app(
         return _serve_result_file(request, processing_id, filename, download=True)
 
     return app
+
+
+def _generate_in_background(service: ReviewService, processing_id: str) -> None:
+    try:
+        service.generate(processing_id)
+    except Exception as error:
+        LOGGER.exception("Background audio generation failed")
+        path = service.store.directory(processing_id) / "generation_state.json"
+        if not path.is_file():
+            import json
+
+            path.write_text(
+                json.dumps(
+                    {"status": "failed", "error": str(error), "percent": 0},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
 
 async def _store_upload(upload: UploadFile, target: Path, size_limit: int) -> None:
@@ -396,6 +453,7 @@ def _review_response(
             "total_pages": total_pages,
             "speaker_filter": speaker,
             "chapter_filter": chapter,
+            "provider_status": request.app.state.review_service.provider_status,
             "error": error,
         },
         status_code=status_code,

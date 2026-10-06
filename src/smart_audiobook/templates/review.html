@@ -159,6 +159,12 @@
         <div>
           <p class="step">GENERACIÓN DEFINITIVA</p>
           <h2>Crear el audiolibro revisado</h2>
+          <label class="provider-status">TTS Provider
+            <select disabled aria-label="Proveedor TTS configurado">
+              <option>{{ provider_status.id | title }}</option>
+            </select>
+            <span>· {% if project.voices %}Ready{% else %}Requiere configuración{% endif %}</span>
+          </label>
           {% if project.unresolved_count %}
             <p class="warning-copy"><strong>{{ project.unresolved_count }}</strong> segmentos de diálogo todavía tienen un speaker desconocido. Puedes continuar si lo deseas.</p>
           {% else %}

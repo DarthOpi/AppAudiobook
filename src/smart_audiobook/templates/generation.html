@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Generando {{ project.analysis.document.title }} · Smart Audiobook{% endblock %}
+
+{% block content %}
+  <section class="hero generation-view">
+    <p class="eyebrow">GENERATING AUDIOBOOK</p>
+    <h1>{{ project.analysis.document.title }}</h1>
+    <p id="progress-copy">Preparando la generación local…</p>
+    <progress id="progress" max="100" value="{{ status.percent or 0 }}">{{ status.percent or 0 }}%</progress>
+    <p id="progress-detail">Capítulo {{ status.chapter_current or 0 }} / {{ status.chapter_total or project.analysis.chapters | length }}</p>
+    <div id="generation-error" class="alert" {% if status.status != 'failed' %}hidden{% endif %}>{{ status.error or '' }}</div>
+    <form action="{{ url_for('cancel_generation', processing_id=project.processing_id) }}" method="post">
+      <button class="secondary-button" type="submit">Cancelar de forma segura</button>
+    </form>
+  </section>
+  <script>
+    const endpoint = {{ url_for('generation_status', processing_id=project.processing_id) | tojson }};
+    const resultUrl = {{ url_for('result_page', processing_id=project.processing_id) | tojson }};
+    async function refreshProgress() {
+      const response = await fetch(endpoint, { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.result_ready) { window.location.replace(resultUrl); return; }
+      const percent = data.percent || 0;
+      document.getElementById("progress").value = percent;
+      document.getElementById("progress-copy").textContent = `${percent}% · ${data.status || "pending"}`;
+      document.getElementById("progress-detail").textContent = `Capítulo ${data.chapter_current || 0} / ${data.chapter_total || 0} · Segmento ${data.segment_current || 0} / ${data.segment_total || 0}`;
+      if (["failed", "cancelled"].includes(data.status)) {
+        const box = document.getElementById("generation-error"); box.hidden = false; box.textContent = data.error || "La generación se detuvo."; return;
+      }
+      window.setTimeout(refreshProgress, 1000);
+    }
+    refreshProgress();
+  </script>
+{% endblock %}
