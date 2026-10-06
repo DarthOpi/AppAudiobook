@@ -1,10 +1,15 @@
 # Smart Audiobook
 
-Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.8** añade memoria de personajes por libro, aliases temporales, resolución contextual y revisión por prioridad sobre el TTS local reanudable de V0.7.
+Smart Audiobook es un proyecto incremental para convertir novelas y novelas web en audiolibros. La **V0.9** añade EPUB, importación independiente del análisis, selección de capítulos y procesamiento parcial persistente sobre Character Intelligence y el TTS local reanudable.
 
-## Qué incluye V0.8
+## Qué incluye V0.9
 
-- Carga automática de `.txt`, `.pdf` y `.docx` mediante una interfaz común.
+- Carga de `.txt`, `.pdf`, `.docx` y `.epub` mediante una interfaz común.
+- Book overview, selección por rango, búsqueda por título/número y preview de importación.
+- Metadata declarada, IDs estables, trazabilidad, estados y texto independiente por capítulo.
+- Análisis incremental, reanálisis y regeneración de capítulos concretos.
+- Énfasis ligero y separadores de escena conservados, con pausa configurable.
+- Estadísticas y estimación local de diálogos antes de llamar a Gemini o TTS.
 - Modelo interno independiente del formato de origen.
 - Extracción de texto nativo en PDF; los PDF escaneados requieren OCR y se rechazan con un mensaje claro.
 - Lectura de párrafos y estilos de encabezado en DOCX.
@@ -14,7 +19,7 @@ Smart Audiobook es un proyecto incremental para convertir novelas y novelas web 
 - Un WAV por capítulo, un WAV completo y `metadata.json`.
 - Nombres de archivo portables y seguros.
 - Interfaz web responsive con templates HTML y CSS propio.
-- Upload validado de TXT, PDF y DOCX con límite de 20 MiB.
+- Upload validado de TXT, PDF, DOCX y EPUB con límite de 20 MiB.
 - Estado temporal por UUID persistido en JSON, sin base de datos.
 - Página de revisión con speakers editables, filtros y paginación.
 - Creación, renombrado y fusión normalizada de personajes.
@@ -29,27 +34,23 @@ Smart Audiobook es un proyecto incremental para convertir novelas y novelas web 
 - Chunking por frases, pausas configurables y concatenación WAV por streaming.
 - Estado por capítulo, reanudación tras fallos y progreso web mediante polling.
 
-No incluye OCR, EPUB, descarga de novelas web, frontend separado, base de datos, autenticación, Docker, biblioteca permanente ni procesamiento asíncrono avanzado.
+No incluye OCR, descarga de novelas web, frontend separado, base de datos, autenticación, Docker, distribución pública ni cola distribuida.
 
 ## Flujo
 
 ```text
-Upload
+Book Source (TXT / PDF / DOCX / EPUB)
   ↓
-Document Pipeline
+Document Importer → Book Manifest → Chapter Index
   ↓
-Speaker Analysis
+Book Overview → Chapter Selection → Import Preview
   ↓
-work/<processing_id>/analysis.json
+Chapter Pipeline
+  ├── Normalize / Segment
+  ├── Character Intelligence
+  └── Review / Manual Overrides / Voices
   ↓
-Review UI
-  ├── Edit speakers
-  ├── Manage characters
-  └── Select and preview voices
-  ↓
-Final TTS generation
-  ↓
-WAV por capítulo + WAV completo + metadata.json
+TTS → Chapter Audio → Full Audiobook
 ```
 
 El formato se detecta por la extensión. Desde `Document` en adelante, el pipeline es el mismo para todos los orígenes.
@@ -121,19 +122,24 @@ Después abre [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
 Flujo básico:
 
-1. Selecciona un TXT, PDF o DOCX de hasta 20 MiB.
-2. Pulsa **Analizar documento**.
-3. Revisa speakers, resuelve los `Unknown`, crea o combina personajes y selecciona voces.
-4. Usa **Preview** para escuchar una muestra corta de cada voz.
-5. Pulsa **Generate audiobook** cuando el reparto esté listo.
-6. Reproduce o descarga cada capítulo y el audiolibro completo.
+1. Selecciona un TXT, PDF, DOCX o EPUB de hasta 20 MiB y pulsa **Importar libro**.
+2. En **Book imported**, comprueba metadata y estadísticas. Abre un capítulo para ver texto y limpieza.
+3. Selecciona capítulos con checkboxes, **Select all**, **Deselect all** o **Select range**; guarda los cambios. `Narrar` controla secciones editoriales independientemente de la selección.
+4. Pulsa **Analizar capítulos seleccionados pendientes**. El progreso de análisis es independiente del audio. Gemini se puede desactivar.
+5. Abre **Revisar personajes**, corrige speakers y selecciona/previsualiza voces.
+6. Pulsa **Generate audiobook**. Se generan solo los capítulos seleccionados y analizados; el WAV completo reúne los capítulos terminados y todavía válidos en orden.
+7. Vuelve a **Capítulos del libro** para continuar con otro rango. En la vista previa puedes reanalizar speakers, regenerar audio o limpiar la caché de un único capítulo.
 
 El upload inicial se valida en una carpeta temporal. Después se crea un espacio de trabajo controlado, identificado exclusivamente mediante UUID:
 
 ```text
 work/<processing_id>/
 ├── source/<documento_sanitizado>
+├── project.json                # Metadata e índice pequeño; schema_version = 3
 ├── analysis.json
+├── chapters/<chapter_id>.json  # Texto original, normalizado y bloques
+├── chapters/<chapter_id>.analysis.json
+├── cache/chapters/<chapter_id>/
 ├── previews/<hash_de_voz>.wav
 └── audio/<nombre_libro>/
     ├── 01_capitulo.wav
@@ -141,7 +147,73 @@ work/<processing_id>/
     └── metadata.json
 ```
 
-`analysis.json` contiene el análisis editable, los identificadores de segmento, confianza, método de resolución, catálogo de voces y asignaciones. Recargar o filtrar la página reutiliza este estado: no vuelve a extraer el documento ni a ejecutar Gemini. Los endpoints validan el UUID y nunca utilizan nombres proporcionados por el navegador como rutas internas.
+`analysis.json` mantiene el registro de personajes, catálogo, asignaciones, caché LLM y referencias a los análisis por capítulo. `project.json` mantiene metadata, selección, estados y referencias de contenido; no duplica el texto del libro. Recargar la página reutiliza el estado sin volver a importar ni ejecutar Gemini. Los endpoints validan UUID y rutas controladas.
+
+## EPUB support
+
+Se utiliza [EbookLib 0.20](https://pypi.org/project/EbookLib/), una biblioteca dedicada a EPUB 2/3 que expone metadata, TOC y spine. Se añade una sola dependencia directa; `lxml` ya forma parte de la pila de DOCX. EbookLib publica su licencia AGPL: el repositorio todavía no establece una licencia propia.
+
+El adaptador recorre `book.spine` en orden de lectura, no el orden de archivos del ZIP. Conserva título, autor, idioma, editorial e identificador declarados; no inventa datos ni cambia el idioma TTS. Cada item es una sección; headings HTML del mismo nivel permiten dividir items con varios capítulos. Si no hay headings se intentan patrones de capítulos, y como fallback se conserva la sección textual. Si falta spine se utiliza el orden del manifest como fallback, sin afirmar que sea el orden editorial correcto.
+
+Antes de EbookLib se valida el ZIP: máximo 10.000 entradas, 200 MiB descomprimidos en total, 8 MiB por entrada y ratio de compresión máximo 500. Se rechazan rutas absolutas, `..`, URLs externas en referencias del paquete, entradas duplicadas, enlaces simbólicos, cifrado y declaraciones de entidades XML. No se extrae el archivo a disco. No se elimina DRM ni se intenta abrir contenido cifrado.
+
+El HTML se convierte a texto con un parser sin red; no se ejecuta JavaScript. Se eliminan scripts, styles, navegación, controles, elementos ocultos explícitamente y marcadores de página semánticos. Portadas, copyright, dedicatorias, agradecimientos y apéndices reciben una etiqueta cuando hay evidencia sencilla; permanecen narrables salvo navegación reconocida. Ante la duda se conserva el contenido y el usuario decide con `Narrar`.
+
+Se conserva énfasis `italic`/`bold` a nivel de bloque y segmento, no offsets exactos por palabra. Los separadores `***`, `* * *`, `---`, `§` y `<hr>` producen `scene_break_before`; no se pronuncia el separador y se añade una pausa (por defecto 1.000 ms, `TTS_SCENE_BREAK_PAUSE_MS`). La prosodia no cambia automáticamente. Las comillas, rayas y elipsis Unicode se conservan.
+
+Para crear un EPUB original de prueba:
+
+```powershell
+python examples/create_demo_epub.py
+smart-audiobook import examples/demo_v09.epub
+```
+
+El comando imprime un `project_id`. La web también puede importar ese archivo con **Importar libro**.
+
+## Partial book processing
+
+Ejemplo, sustituyendo `UUID` por el identificador devuelto por `import`:
+
+```powershell
+smart-audiobook chapters UUID --estimates
+smart-audiobook preview UUID --chapter 1
+smart-audiobook analyze UUID --chapters 1-2 --no-llm
+smart-audiobook generate UUID --chapters 1-2
+smart-audiobook analyze UUID --chapters 3 --no-llm
+smart-audiobook generate UUID --chapters 3
+```
+
+`--chapters` acepta rangos y listas como `1-10,25,100-150` y guarda la selección. `--work-root` permite usar otro directorio de proyectos. Omitir el rango utiliza la selección persistente; no selecciona automáticamente todo de nuevo. Los comandos CLI de versiones anteriores siguen funcionando como flujo automático explícito.
+
+Para operaciones independientes:
+
+```powershell
+smart-audiobook analyze UUID --chapters 2 --reanalyze --no-llm
+smart-audiobook generate UUID --chapters 2 --force-regenerate
+smart-audiobook clear-cache UUID --chapter 2
+```
+
+El reanálisis de capítulo vuelve a resolver speakers sobre los segmentos existentes y conserva IDs, texto y overrides `manual`; no resegmenta el documento. Cambios de speakers o conocimiento marcan posibles inconsistencias posteriores sin borrar esos capítulos. El nuevo rango reutiliza perfiles, aliases temporales, voces manuales y caché LLM. Un capítulo ya analizado se omite salvo `--reanalyze`.
+
+Cada capítulo mantiene un `ChapterStatus` centralizado: `not_analyzed`, `analyzing`, `analyzed`, `review_required`, `ready_for_audio`, `generating_audio`, `completed`, `failed`. `Unknown` puede narrarse con su voz provisional tras la revisión del usuario. Al reiniciar el servidor local, las operaciones interrumpidas pasan a `failed` para poder reintentarse; se conservan audio cacheado y estado de generación.
+
+La caché de audio de proyectos nuevos se separa por capítulo. Limpiar un capítulo elimina solo su namespace e invalida su entrada de generación; otro capítulo no pierde su caché. El WAV completo contiene los capítulos `completed`, no presupone que todo el libro haya sido generado. Editar un capítulo lo devuelve a revisión/listo para audio y excluye su audio antiguo de la próxima composición.
+
+Los proyectos V0.8 sin manifest cargan sus segmentos, correcciones, perfiles y voces tal como estaban. Se recupera el índice desde el documento original sin análisis LLM; si falta el origen, se reconstruye texto a partir de los segmentos disponibles. El siguiente guardado crea `project.json` V3 y archivos por capítulo. El esquema de registro de personajes en `analysis.json` sigue en V2 por compatibilidad: son versiones de archivos diferentes.
+
+Las estadísticas rápidas se calculan desde el índice: capítulos, palabras seleccionadas/totales, duración orientativa a `READING_WORDS_PER_MINUTE=160` y categoría de tamaño. `--estimates` recorre solo el texto seleccionado para contar segmentos y atribuciones explícitas; el resto de diálogos es un máximo aproximado de llamadas LLM antes de continuidad y caché. No consulta Gemini. Se informa del proveedor/dispositivo solicitado, pero no se inventa un tiempo de generación ni una tarifa Gemini.
+
+Smoke test sin red y sin voces instaladas (WAV silencioso de prueba):
+
+```powershell
+python examples/verify_book_import.py
+```
+
+Con Piper instalado y modelos disponibles, para conservar una prueba con audio real:
+
+```powershell
+python examples/verify_book_import.py --real-tts --work-root output/v09-smoke
+```
 
 ## V0.6 – Character & Voice Review
 
@@ -422,10 +494,13 @@ src/smart_audiobook/
 ├── audio.py                  # Síntesis ordenada y combinación WAV
 ├── audio_cache.py            # Caché SHA-256 persistente y atómica
 ├── book_processor.py         # Orquestación de libro, capítulos y metadatos
+├── book_manifest.py          # Índice pequeño, fuentes lazy y estimaciones
+├── book_workflow.py          # Importación, selección y bloques incrementales
 ├── chapter_detection.py      # Heurísticas y estilos DOCX
 ├── characters.py             # Registro canónico de personajes
 ├── cli.py                    # Interfaz de línea de comandos
-├── document_loaders.py       # Adaptadores TXT, PDF y DOCX
+├── document_loaders.py       # Adaptadores TXT, PDF, DOCX y EPUB
+├── epub_importer.py          # Validación ZIP, spine y HTML offline
 ├── gemini_provider.py        # Adaptador del SDK oficial de Gemini
 ├── gemini_resolver.py        # Configuración por entorno y compatibilidad
 ├── llm_providers.py          # Contrato independiente del proveedor LLM
@@ -450,7 +525,7 @@ src/smart_audiobook/
 └── static/                   # CSS responsive
 ```
 
-`AudiobookApplicationService` continúa siendo el punto de entrada compartido. La CLI conserva `process()` para el flujo automático; la web usa `analyze()` y solo llama a `generate()` después de la revisión. `ReviewService` aplica las ediciones y `ReviewProjectStore` persiste el estado. Las rutas HTTP validan el borde web y no contienen reglas de personajes, voces ni TTS.
+La CLI conserva `AudiobookApplicationService.process()` para el flujo automático. El flujo incremental usa `BookWorkflow` desde CLI y web; `ReviewService` conserva ediciones, voces y generación, y `ReviewProjectStore` persiste manifest, registro y análisis. Las llamadas a Gemini permanecen detrás del proveedor LLM.
 
 ```text
                     TTSProvider
@@ -504,14 +579,19 @@ comparar el comportamiento estrictamente local, repite el análisis con
 
 ```powershell
 python -m pip install -e ".[web,test,llm]"
-python -m unittest discover -s tests -v
+python -m pytest -q
 ```
 
-La suite cubre el pipeline anterior y la web, además del contrato TTS, catálogo Piper, CPU fallback, capabilities, claves e invalidación de caché, hits/misses, chunking, fallos, reanudación y capítulos idempotentes. Gemini y Piper se simulan cuando corresponde; las pruebas normales no consumen API, descargan modelos ni cargan redes neuronales. La integración real Piper es opt-in con `RUN_PIPER_INTEGRATION=1`.
+La suite cubre el pipeline anterior y la web, Character Intelligence, EPUBs pequeños generados localmente, orden spine, metadata, HTML, límites ZIP, rangos, fuentes lazy, overrides, migración, generación parcial y limpieza de caché. Gemini y Piper se simulan cuando corresponde; las pruebas normales no consumen API, descargan modelos ni cargan redes neuronales. La integración real Piper es opt-in con `RUN_PIPER_INTEGRATION=1`.
 
 ## Limitaciones conocidas
 
 - No hay OCR para PDF escaneados.
+- EbookLib carga en memoria el paquete validado durante la importación (con límites estrictos); después, el texto se carga por capítulo y no se concatena el EPUB entero. No es un parser EPUB completamente streaming.
+- Los análisis ya realizados se cargan en memoria para revisión/registro; la persistencia no reescribe capítulos intactos, pero aún no hay paginación de segmentos en disco.
+- La limpieza HTML no interpreta hojas CSS externas ni resuelve maquetaciones complejas; énfasis y secciones editoriales son metadata ligera.
+- EPUBs sin spine fiable usan un fallback de secciones; el orden y títulos pueden necesitar comprobación manual. No se soporta DRM, contenido cifrado, imágenes narradas ni maquetación fija compleja.
+- Los IDs de capítulo permanecen estables dentro del proyecto y para el mismo origen; no son un mecanismo para reconciliar ediciones diferentes del mismo libro.
 - La extracción PDF depende de cómo esté construido el documento y puede alterar el orden de maquetaciones complejas.
 - Las tablas e imágenes DOCX no se narran.
 - Las heurísticas pueden detectar de más o de menos en novelas con encabezados no convencionales.
