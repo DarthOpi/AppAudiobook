@@ -178,6 +178,38 @@ class WebInterfaceTests(unittest.TestCase):
         self.client.get(response.url.path)
         self.assertEqual(len(self.service.received_names), 1)
 
+    def test_pending_generation_page_renders_json_urls(self) -> None:
+        uploaded = self._upload("story.txt", b"A story")
+        job_id = uploaded.url.path.rstrip("/").split("/")[-1]
+
+        response = self.client.get(f"/generation/{job_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            f'const endpoint = "http://testserver/generation/{job_id}/status";',
+            response.text,
+        )
+        self.assertIn(
+            f'const resultUrl = "http://testserver/results/{job_id}";',
+            response.text,
+        )
+        self.assertFalse(self.service.generated)
+
+    def test_completed_generation_redirects_to_playable_result(self) -> None:
+        uploaded = self._upload("story.txt", b"A story")
+        job_id = uploaded.url.path.rstrip("/").split("/")[-1]
+        self.client.post(f"/review/{job_id}/generate", follow_redirects=False)
+
+        response = self.client.get(f"/generation/{job_id}", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        result = self.client.get(response.headers["location"])
+        self.assertEqual(result.status_code, 200)
+        self.assertIn(f"/media/{job_id}/full_audiobook.wav", result.text)
+        self.assertIn(f"/downloads/{job_id}/full_audiobook.wav", result.text)
+        status = self.client.get(f"/generation/{job_id}/status")
+        self.assertTrue(status.json()["result_ready"])
+
     def test_complete_review_flow_uses_manual_changes(self) -> None:
         uploaded = self._upload("story.txt", b"A story")
         processing_id = uploaded.url.path.rstrip("/").split("/")[-1]

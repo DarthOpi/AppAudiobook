@@ -15,8 +15,8 @@
     </form>
   </section>
   <script>
-    const endpoint = {{ url_for('generation_status', processing_id=project.processing_id) | tojson }};
-    const resultUrl = {{ url_for('result_page', processing_id=project.processing_id) | tojson }};
+    const endpoint = {{ url_for('generation_status', processing_id=project.processing_id) | string | tojson }};
+    const resultUrl = {{ url_for('result_page', processing_id=project.processing_id) | string | tojson }};
     async function refreshProgress() {
       const response = await fetch(endpoint, { cache: "no-store" });
       if (!response.ok) return;
