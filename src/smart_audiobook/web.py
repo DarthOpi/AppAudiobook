@@ -16,6 +16,7 @@ from smart_audiobook.application import (
     ProcessingResult,
 )
 from smart_audiobook.characters import normalize_character_name
+from smart_audiobook.character_config import CharacterConfig
 from smart_audiobook.document_loaders import DocumentLoadError
 from smart_audiobook.review_service import ReviewService
 from smart_audiobook.review_store import (
@@ -50,7 +51,7 @@ def create_app(
 ) -> FastAPI:
     """Create an injectable web application for production and tests."""
     logging.getLogger("smart_audiobook").setLevel(logging.INFO)
-    app = FastAPI(title="Smart Audiobook", version="0.7.0")
+    app = FastAPI(title="Smart Audiobook", version="0.8.0")
     templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     work_root = (output_root or Path("work")).resolve()
@@ -135,6 +136,7 @@ def create_app(
         processing_id: str,
         page: int = Query(1, ge=1),
         speaker: str = "all",
+        issue: str = "all",
         chapter: str | None = None,
     ) -> HTMLResponse:
         project = _load_or_404(request, processing_id)
@@ -149,7 +151,43 @@ def create_app(
             page=page,
             speaker=speaker,
             chapter=chapter_number,
+            issue=issue,
         )
+
+    @app.post("/review/{processing_id}/characters/aliases")
+    async def edit_alias(request: Request, processing_id: str):
+        _load_or_404(request, processing_id)
+        form = await request.form()
+        try:
+            await run_in_threadpool(request.app.state.review_service.edit_alias,
+                processing_id, str(form.get("character", "")), str(form.get("alias", "")),
+                int(str(form.get("known_from", "1"))), form.get("action") == "remove")
+        except (ReviewStateError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _review_redirect(request, processing_id)
+
+    @app.post("/review/{processing_id}/reanalyze")
+    async def reanalyze(request: Request, processing_id: str):
+        _load_or_404(request, processing_id)
+        form = await request.form()
+        selected = set(str(v) for v in form.getlist("segment_ids")) or None
+        try:
+            await run_in_threadpool(request.app.state.review_service.reanalyze,
+                processing_id, selected, form.get("scope") == "issues")
+        except (ReviewStateError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _review_redirect(request, processing_id)
+
+    @app.post("/review/{processing_id}/characters/enrich")
+    async def enrich_character(request: Request, processing_id: str):
+        _load_or_404(request, processing_id)
+        form = await request.form()
+        try:
+            await run_in_threadpool(request.app.state.review_service.enrich_character,
+                processing_id, str(form.get("character", "")), int(str(form.get("chapter", "1"))))
+        except (ReviewStateError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _review_redirect(request, processing_id)
 
     @app.post("/review/{processing_id}/segments")
     async def save_segments(request: Request, processing_id: str):
@@ -202,8 +240,9 @@ def create_app(
                 processing_id,
                 str(form.get("source_name", "")),
                 str(form.get("target_name", "")),
+                int(str(form.get("known_from", "1"))),
             )
-        except ReviewStateError as error:
+        except (ReviewStateError, ValueError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return _review_redirect(request, processing_id)
 
@@ -425,8 +464,23 @@ def _review_response(
     chapter: int | None = None,
     error: str | None = None,
     status_code: int = 200,
+    issue: str = "all",
 ) -> HTMLResponse:
     dialogues = list(project.dialogues)
+    duplicates = project.analysis.registry.duplicate_suggestions()
+    duplicate_names = {name for pair in duplicates for name in pair}
+    if issue == "unresolved":
+        dialogues = [s for s in dialogues if s.speaker == "Unknown"]
+    elif issue == "low_confidence":
+        threshold = CharacterConfig.from_environment().accept_confidence
+        dialogues = [s for s in dialogues if s.confidence is not None and s.confidence < threshold]
+    elif issue == "new_characters":
+        dialogues = [s for s in dialogues if s.new_character_candidate]
+    elif issue == "duplicates":
+        dialogues = [s for s in dialogues if s.speaker in duplicate_names]
+    elif issue != "all":
+        raise HTTPException(status_code=400, detail="Filtro de revisión no válido.")
+    dialogues.sort(key=lambda s: (not s.review_needed, s.confidence if s.confidence is not None else -1, s.order))
     if speaker == "unknown":
         dialogues = [item for item in dialogues if item.speaker == "Unknown"]
     elif speaker != "all":
@@ -447,6 +501,9 @@ def _review_response(
         name="review.html",
         context={
             "project": project,
+            "profiles": project.analysis.registry.profiles,
+            "duplicates": duplicates,
+            "issue_filter": issue,
             "dialogues": visible_dialogues,
             "filtered_count": len(dialogues),
             "page": page,

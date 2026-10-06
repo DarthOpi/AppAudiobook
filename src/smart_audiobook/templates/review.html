@@ -27,6 +27,34 @@
     <aside class="panel review-sidebar" aria-labelledby="cast-title">
       <p class="step">PERSONAJES Y VOCES</p>
       <h2 id="cast-title">Reparto</h2>
+      <details class="registry-panel" open>
+        <summary>Character Registry</summary>
+        {% for profile in profiles if profile.canonical_name != 'Narrator' %}
+        <article class="character-editor">
+          <strong>{{ profile.canonical_name }}{% if profile.pending %} · Pending / review needed{% endif %}</strong>
+          <small>{{ profile.importance }} · {{ profile.dialogue_count }} diálogos · {{ profile.mention_count }} menciones · {{ profile.chapter_count }} capítulos</small>
+          <small>Primera: {{ profile.first_seen_chapter or 'unknown' }} · Última: {{ profile.last_seen_chapter or 'unknown' }} · {{ profile.voice_strategy }}</small>
+          <small>Voz: {{ profile.voice_id or 'provisional / sin asignar' }}</small>
+          {% for suggestion in profile.alias_suggestions %}<p class="warning-copy">Alias sugerido por el texto: {{ suggestion.name }} · capítulo {{ suggestion.known_from_chapter }}. Añádelo o confirma una fusión.</p>{% endfor %}
+          {% if profile.description %}<p>{{ profile.description }} (conocido desde capítulo {{ profile.knowledge.get('description', '?') }})</p>{% endif %}
+          {% for alias in profile.aliases %}
+          <form action="{{ url_for('edit_alias', processing_id=project.processing_id) }}" method="post" class="compact-form">
+            <input type="hidden" name="character" value="{{ profile.canonical_name }}"><input type="hidden" name="alias" value="{{ alias.name }}">
+            <span>{{ alias.name }} · desde {{ alias.known_from_chapter }}</span><button name="action" value="remove" class="small-button">Eliminar alias</button>
+          </form>
+          {% endfor %}
+          <form action="{{ url_for('edit_alias', processing_id=project.processing_id) }}" method="post" class="compact-form vertical">
+            <input type="hidden" name="character" value="{{ profile.canonical_name }}">
+            <input name="alias" placeholder="Alias" required aria-label="Nuevo alias"><input type="number" name="known_from" min="1" value="1" required aria-label="Conocido desde capítulo">
+            <button class="small-button">Añadir alias</button>
+          </form>
+          <form action="{{ url_for('enrich_character', processing_id=project.processing_id) }}" method="post" class="compact-form">
+            <input type="hidden" name="character" value="{{ profile.canonical_name }}"><input name="chapter" type="number" min="1" value="{{ profile.last_seen_chapter or 1 }}" aria-label="Evidencia hasta capítulo"><button class="small-button">Enriquecer con Gemini</button>
+          </form>
+        </article>
+        {% endfor %}
+      </details>
+      {% if duplicates %}<div class="alert"><strong>Possible duplicate characters</strong>{% for a, b in duplicates %}<span>{{ a }} ↔ {{ b }} · confirma el destino en Fusionar personajes.</span>{% endfor %}</div>{% endif %}
 
       {% if not project.voices %}
         <div class="alert"><strong>No hay voces disponibles.</strong><span>Instala una voz del sistema antes de generar.</span></div>
@@ -82,6 +110,7 @@
               {% for character in project.characters %}<option>{{ character }}</option>{% endfor %}
             </select>
             <button class="small-button" type="submit">Fusionar</button>
+            <label>Identidad conocida desde capítulo<input type="number" name="known_from" min="1" value="1" required></label>
           </form>
         </details>
       {% endif %}
@@ -100,6 +129,13 @@
               <option value="unknown" {% if speaker_filter == 'unknown' %}selected{% endif %}>Unknown only</option>
               {% for character in project.analysis.characters %}
                 <option value="{{ character }}" {% if speaker_filter == character %}selected{% endif %}>{{ character }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Review Issues
+            <select name="issue">
+              {% for key, label in [('all','Todos'),('unresolved','Unresolved'),('low_confidence','Low confidence'),('new_characters','New characters'),('duplicates','Duplicates')] %}
+              <option value="{{ key }}" {% if issue_filter == key %}selected{% endif %}>{{ label }}</option>
               {% endfor %}
             </select>
           </label>
@@ -125,6 +161,7 @@
                 <span>{{ segment.resolution_method or 'unknown' | upper }}</span>
               </div>
               <blockquote>“{{ segment.text }}”</blockquote>
+              {% if segment.review_needed %}<p class="warning-copy">Revisión recomendada{% if segment.new_character_candidate %}: nuevo candidato {{ segment.new_character_candidate }}{% endif %}</p>{% endif %}
               <div class="speaker-control">
                 <label>Speaker
                   <select name="speaker_{{ segment.id }}" class="speaker-select" data-new-target="new_{{ segment.id }}">
@@ -132,6 +169,7 @@
                       <option value="{{ character }}" {% if segment.speaker == character %}selected{% endif %}>{{ character }}</option>
                     {% endfor %}
                     <option value="__new__">New character…</option>
+                    {% for profile in profiles if profile.pending %}<option value="{{ profile.canonical_name }}">Confirmar candidato: {{ profile.canonical_name }}</option>{% endfor %}
                   </select>
                 </label>
                 <label class="new-character" id="new_{{ segment.id }}" hidden>Nombre nuevo
@@ -147,11 +185,19 @@
         {% if dialogues %}<button class="secondary-button save-review" type="submit">Guardar cambios visibles</button>{% endif %}
       </form>
 
+      <form action="{{ url_for('reanalyze', processing_id=project.processing_id) }}" method="post" class="panel">
+        <h2>Reanalizar</h2>
+        <p>Las correcciones manuales se conservan.</p>
+        <select name="scope"><option value="unresolved">Solo Unknown</option><option value="issues">Unknown y baja confianza</option></select>
+        {% for segment in dialogues %}<label><input type="checkbox" name="segment_ids" value="{{ segment.id }}">{{ segment.id }}</label>{% endfor %}
+        <button class="small-button">Reanalizar seleccionados o pendientes</button>
+      </form>
+
       {% if total_pages > 1 %}
         <nav class="pagination" aria-label="Paginación">
-          {% if page > 1 %}<a href="?page={{ page - 1 }}&speaker={{ speaker_filter }}{% if chapter_filter %}&chapter={{ chapter_filter }}{% endif %}">← Anterior</a>{% endif %}
+          {% if page > 1 %}<a href="?page={{ page - 1 }}&speaker={{ speaker_filter }}&issue={{ issue_filter }}{% if chapter_filter %}&chapter={{ chapter_filter }}{% endif %}">← Anterior</a>{% endif %}
           <span>Página {{ page }} de {{ total_pages }}</span>
-          {% if page < total_pages %}<a href="?page={{ page + 1 }}&speaker={{ speaker_filter }}{% if chapter_filter %}&chapter={{ chapter_filter }}{% endif %}">Siguiente →</a>{% endif %}
+          {% if page < total_pages %}<a href="?page={{ page + 1 }}&speaker={{ speaker_filter }}&issue={{ issue_filter }}{% if chapter_filter %}&chapter={{ chapter_filter }}{% endif %}">Siguiente →</a>{% endif %}
         </nav>
       {% endif %}
 
