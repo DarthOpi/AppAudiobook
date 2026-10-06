@@ -48,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tts-provider",
-        choices=("piper", "system"),
+        choices=("piper", "system", "chatterbox"),
         help="Proveedor TTS (si se omite, usa TTS_PROVIDER; por defecto Piper).",
     )
     parser.add_argument(
@@ -137,7 +137,7 @@ def _book_command(arguments: list[str]) -> int:
     parser.add_argument("--reanalyze", action="store_true", help="Volver a resolver speakers conservando overrides.")
     parser.add_argument("--force-regenerate", action="store_true")
     parser.add_argument("--estimates", action="store_true", help="Contar diálogos localmente sin Gemini.")
-    parser.add_argument("--tts-provider", choices=("piper", "system"))
+    parser.add_argument("--tts-provider", choices=("piper", "system", "chatterbox"))
     args = parser.parse_args(arguments[1:])
     command = arguments[0]
     try:
@@ -210,7 +210,8 @@ def _configure_cli_logging() -> None:
     """Show project events without enabling verbose dependency logs."""
     project_logger = logging.getLogger("smart_audiobook")
     if not project_logger.handlers:
-        handler = logging.StreamHandler()
+        # Original stderr survives repeated embedded/test invocations.
+        handler = logging.StreamHandler(sys.__stderr__)
         handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
         project_logger.addHandler(handler)
     project_logger.setLevel(logging.INFO)

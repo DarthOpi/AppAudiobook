@@ -135,18 +135,19 @@ def book_statistics(document: Document, *, detailed: bool = False,
         "processing_note": "Duración de lectura estimada; la generación depende del equipo, modelo y caché.",
         "cost_note": "TTS local sin tarifa API. El coste/cuota Gemini depende del modelo y plan; no se calcula una tarifa inventada."}
     if detailed:
-        dialogue_count = segments_count = explicit = 0
+        dialogue_count = thought_count = segments_count = explicit = 0
         rules = RuleBasedSpeakerResolver()
         for chapter in selected:
             segments = segment_text(chapter.read_text())
             segments_count += len(segments)
             for i, segment in enumerate(segments):
-                if segment.type == "dialogue":
-                    dialogue_count += 1
+                if segment.type in {"dialogue", "internal_thought"}:
+                    dialogue_count += int(segment.type == "dialogue")
+                    thought_count += int(segment.type == "internal_thought")
                     context = SpeakerContext(segment, tuple(segments[max(0, i-4):i]), tuple(segments[i+1:i+5]), ())
                     explicit += int(rules.resolve(context) is not None)
-        result.update(estimated_dialogues=dialogue_count, estimated_segments=segments_count,
-            estimated_rule_resolution_percent=round(explicit*100/max(1, dialogue_count)),
-            estimated_llm_calls_upper_bound=dialogue_count-explicit,
+        result.update(estimated_dialogues=dialogue_count, estimated_internal_thoughts=thought_count, estimated_segments=segments_count,
+            estimated_rule_resolution_percent=round(explicit*100/max(1, dialogue_count+thought_count)),
+            estimated_llm_calls_upper_bound=dialogue_count+thought_count-explicit,
             llm_estimate_note="Máximo aproximado antes de continuidad, candidatos y caché; cero llamadas si LLM está desactivado.")
     return result

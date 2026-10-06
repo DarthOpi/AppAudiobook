@@ -22,6 +22,10 @@ class TTSConfig:
     speaker_change_pause_ms: int = 260
     chapter_pause_ms: int = 700
     scene_break_pause_ms: int = 1000
+    voice_profiles_file: Path | None = None
+    chatterbox_model_directory: Path = Path("voices/chatterbox")
+    chatterbox_device: str = "cpu"
+    chatterbox_t3_model: str = "v2"
 
     @classmethod
     def from_environment(cls, provider_override: str | None = None) -> "TTSConfig":
@@ -34,6 +38,10 @@ class TTSConfig:
         try:
             config = cls(
                 provider=(provider_override or os.getenv("TTS_PROVIDER", "piper")).casefold(),
+                voice_profiles_file=Path(os.environ["VOICE_PROFILES_FILE"]) if os.getenv("VOICE_PROFILES_FILE") else None,
+                chatterbox_model_directory=Path(os.getenv("CHATTERBOX_MODEL_DIR", "voices/chatterbox")),
+                chatterbox_device=os.getenv("CHATTERBOX_DEVICE", "cpu"),
+                chatterbox_t3_model=os.getenv("CHATTERBOX_T3_MODEL", "v2"),
                 piper_voices_directory=Path(os.getenv("PIPER_VOICES_DIR", "voices")),
                 piper_device=os.getenv("PIPER_DEVICE", "auto").casefold(),
                 chunk_max_chars=int(os.getenv("TTS_CHUNK_MAX_CHARS", "400")),
@@ -47,8 +55,8 @@ class TTSConfig:
             raise SpeechGenerationError(
                 "La configuración numérica de TTS no es válida."
             ) from error
-        if config.provider not in {"piper", "system"}:
-            raise SpeechGenerationError("TTS_PROVIDER debe ser piper o system.")
+        if config.provider not in {"piper", "system", "chatterbox"}:
+            raise SpeechGenerationError("TTS_PROVIDER debe ser piper, system o chatterbox.")
         if not 80 <= config.chunk_max_chars <= 2000:
             raise SpeechGenerationError(
                 "TTS_CHUNK_MAX_CHARS debe estar entre 80 y 2000."
@@ -70,10 +78,19 @@ class TTSConfig:
 def build_tts_provider(config: TTSConfig | None = None) -> TTSProvider:
     config = config or TTSConfig.from_environment()
     if config.provider == "piper":
-        return PiperTTSProvider(
+        engine = PiperTTSProvider(
             config.piper_voices_directory,
             device=config.piper_device,  # type: ignore[arg-type]
         )
-    if config.provider == "system":
-        return SystemTTSProvider()
-    raise SpeechGenerationError(f"Proveedor TTS no soportado: {config.provider}")
+    elif config.provider == "system":
+        engine = SystemTTSProvider()
+    elif config.provider == "chatterbox":
+        from smart_audiobook.chatterbox_provider import ChatterboxTTSProvider
+        engine = ChatterboxTTSProvider(config.chatterbox_model_directory, config.chatterbox_device,
+            t3_model=config.chatterbox_t3_model)
+    else:
+        raise SpeechGenerationError(f"Proveedor TTS no soportado: {config.provider}")
+    if config.voice_profiles_file:
+        from smart_audiobook.voice_catalog import ProfiledTTSProvider, load_voice_profiles
+        return ProfiledTTSProvider(engine, load_voice_profiles(config.voice_profiles_file))
+    return engine

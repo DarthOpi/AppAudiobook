@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-SegmentType = Literal["narration", "dialogue"]
+SegmentType = Literal["narration", "dialogue", "internal_thought", "system_message"]
 ResolutionSource = Literal["rule", "conversation", "candidate", "llm", "manual", "system", "unknown"]
 DocumentFormat = Literal["txt", "pdf", "docx", "epub"]
 
@@ -99,6 +99,8 @@ class TextSegment:
     new_character_candidate: str | None = None
     emphasis: tuple[str, ...] = ()
     scene_break_before: bool = False
+    context_before: str = field(default="", compare=False)
+    context_after: str = field(default="", compare=False)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the segment."""
@@ -115,6 +117,8 @@ class TextSegment:
             "new_character_candidate": self.new_character_candidate,
             "emphasis": list(self.emphasis),
             "scene_break_before": self.scene_break_before,
+            "context_before": self.context_before,
+            "context_after": self.context_after,
         }
 
 
@@ -146,6 +150,7 @@ class SpeakerContext:
         """Return a stable key for identical LLM requests in one execution."""
         return (
             self.dialogue.text,
+            self.dialogue.type,
             tuple(
                 (segment.type, segment.speaker, segment.text)
                 for segment in self.before

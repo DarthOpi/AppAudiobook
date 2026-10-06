@@ -14,7 +14,7 @@
 <p>Lectura aproximada: {{ stats.approximate_reading_minutes }} minutos a {{ stats.words_per_minute }} palabras/minuto. Tamaño: {{ stats.size_category }}.</p>
 <p>TTS: {{ stats.tts_provider }} · dispositivo solicitado: {{ stats.device_requested }}. {{ stats.processing_note }}</p>
 <p>{{ stats.cost_note }}</p>
-{% if stats.estimated_dialogues is defined %}<p>Estimación: {{ stats.estimated_dialogues }} diálogos, {{ stats.estimated_segments }} segmentos; {{ stats.estimated_rule_resolution_percent }}% con atribución explícita. Hasta {{ stats.estimated_llm_calls_upper_bound }} llamadas LLM. {{ stats.llm_estimate_note }}</p>{% endif %}
+{% if stats.estimated_dialogues is defined %}<p>Estimación: {{ stats.estimated_dialogues }} diálogos, {{ stats.estimated_internal_thoughts }} pensamientos, {{ stats.estimated_segments }} segmentos; {{ stats.estimated_rule_resolution_percent }}% con atribución explícita. Hasta {{ stats.estimated_llm_calls_upper_bound }} llamadas LLM. {{ stats.llm_estimate_note }}</p>{% endif %}
 <a href="{{ url_for('book_overview', processing_id=project.processing_id) }}?estimates=true">Calcular estimación de diálogos sin Gemini</a>
 </section>
 <section class="panel"><h2>Seleccionar capítulos</h2>

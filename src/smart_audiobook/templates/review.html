@@ -18,15 +18,28 @@
 
   <section class="stats-grid" aria-label="Estadísticas del análisis">
     <article><strong>{{ project.analysis.chapters | length }}</strong><span>capítulos</span></article>
-    <article><strong>{{ project.characters | length }}</strong><span>personajes</span></article>
+    <article><strong>{{ analysis_metrics.characters_detected }}</strong><span>personajes confirmados</span></article>
     <article><strong>{{ project.segments | length }}</strong><span>segmentos</span></article>
     <article class="{% if project.unresolved_count %}stat-warning{% endif %}"><strong>{{ project.unresolved_count }}</strong><span>sin resolver</span></article>
   </section>
 
+  <section class="panel" aria-label="Diagnóstico del análisis">
+    <h2>Diagnóstico del análisis</h2>
+    <p>Narration: {{ analysis_metrics.narration_segments }} · Dialogue: {{ analysis_metrics.dialogue_segments }} · Internal thoughts: {{ analysis_metrics.internal_thought_segments }}</p>
+    <p>Rules: {{ analysis_metrics.speakers_resolved_by_rules }} · LLM: {{ analysis_metrics.speakers_resolved_by_llm }} · Manual: {{ analysis_metrics.speakers_resolved_manually }} · Unknown: {{ analysis_metrics.unresolved_segments }}</p>
+    <p>Characters: {{ analysis_metrics.characters_detected }} · Gemini calls: {{ analysis_metrics.get('gemini_calls', 0) }} · LLM errors: {{ analysis_metrics.get('llm_errors', 0) }} · Respuestas rechazadas: {{ analysis_metrics.get('llm_rejected_responses', 0) }}. Las llamadas son acumuladas; las resoluciones describen el estado actual.</p>
+    {% for warning in analysis_warnings %}<div class="alert" role="alert">{{ warning }}</div>{% endfor %}
+  </section>
   <section class="review-layout">
     <aside class="panel review-sidebar" aria-labelledby="cast-title">
       <p class="step">PERSONAJES Y VOCES</p>
       <h2 id="cast-title">Reparto</h2>
+      <p>{{ project.voices | length }} voces/perfiles disponibles. Cambiar velocidad en Piper no crea otra identidad vocal.</p>
+      <div id="voice-filters" class="compact-form vertical">
+        <input id="voice-search" placeholder="Buscar voz por nombre" aria-label="Buscar voz">
+        <select id="voice-language" aria-label="Filtrar idioma"><option value="">Todos los idiomas</option>{% for language in project.voices | map(attribute='language') | reject('none') | unique | sort %}<option>{{ language }}</option>{% endfor %}</select>
+        <select id="voice-gender" aria-label="Filtrar género"><option value="">Toda la metadata de género</option>{% for gender in project.voices | map(attribute='gender') | reject('none') | unique | sort %}<option>{{ gender }}</option>{% endfor %}</select>
+      </div>
       <details class="registry-panel" open>
         <summary>Character Registry</summary>
         {% for profile in profiles if profile.canonical_name != 'Narrator' %}
@@ -72,8 +85,8 @@
               <label>Voz
                 <select name="voice_id" {% if not project.voices %}disabled{% endif %}>
                   {% for voice in project.voices %}
-                    <option value="{{ voice.id }}" {% if project.voice_assignments.get(character) == voice.id %}selected{% endif %}>
-                      {{ voice.name }}{% if voice.language %} · {{ voice.language }}{% endif %}{% if voice.gender %} · {{ voice.gender }}{% endif %}
+                    <option value="{{ voice.id }}" data-voice-name="{{ voice.name }}" data-language="{{ voice.language or '' }}" data-gender="{{ voice.gender or '' }}" {% if project.voice_assignments.get(character) == voice.id %}selected{% endif %}>
+                      {{ voice.name }} · {{ voice.provider }}{% if voice.language %} · {{ voice.language }}{% endif %}{% if voice.gender %} · {{ voice.gender }}{% endif %}
                     </option>
                   {% endfor %}
                 </select>
@@ -119,7 +132,7 @@
     <div class="review-main">
       <section class="panel review-toolbar">
         <div>
-          <p class="step">DIÁLOGOS</p>
+          <p class="step">DIÁLOGOS Y PENSAMIENTOS</p>
           <h2>{{ filtered_count }} resultados</h2>
         </div>
         <form method="get" action="{{ url_for('review_page', processing_id=project.processing_id) }}" class="filter-form">
@@ -156,7 +169,7 @@
           {% for segment in dialogues %}
             <article class="dialogue-card {% if segment.speaker == 'Unknown' %}unresolved-card{% endif %}">
               <div class="dialogue-meta">
-                <span>{{ segment.id }}</span><span>Capítulo {{ segment.chapter }}</span>
+                <span>{{ segment.id }}</span><span>{{ segment.type }}</span><span>Capítulo {{ segment.chapter }}</span>
                 {% if segment.confidence is not none %}<span>{{ (segment.confidence * 100) | round | int }}% confianza</span>{% endif %}
                 <span>{{ segment.resolution_method or 'unknown' | upper }}</span>
               </div>
@@ -165,7 +178,7 @@
               <div class="speaker-control">
                 <label>Speaker
                   <select name="speaker_{{ segment.id }}" class="speaker-select" data-new-target="new_{{ segment.id }}">
-                    {% for character in project.characters %}
+                    {% for character in project.characters if character != 'Narrator' %}
                       <option value="{{ character }}" {% if segment.speaker == character %}selected{% endif %}>{{ character }}</option>
                     {% endfor %}
                     <option value="__new__">New character…</option>
@@ -225,6 +238,15 @@
   </section>
 
   <script>
+    function filterVoices() {
+      const query = document.querySelector('#voice-search').value.toLowerCase();
+      const language = document.querySelector('#voice-language').value;
+      const gender = document.querySelector('#voice-gender').value;
+      document.querySelectorAll('option[data-voice-name]').forEach(option => {
+        option.hidden = !option.selected && (!option.dataset.voiceName.toLowerCase().includes(query) || (language && option.dataset.language !== language) || (gender && option.dataset.gender !== gender));
+      });
+    }
+    document.querySelectorAll('#voice-filters input, #voice-filters select').forEach(control => control.addEventListener('input', filterVoices));
     document.querySelectorAll(".speaker-select").forEach((select) => {
       const toggle = () => {
         const target = document.getElementById(select.dataset.newTarget);

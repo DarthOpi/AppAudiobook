@@ -23,9 +23,12 @@ class GeminiProvider:
         if client is None:
             from google import genai
 
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key, http_options={"timeout": 30000})
         self._client = client
         self._model = model
+        self.calls = 0
+        self.failures = 0
+        self.last_error: str | None = None
 
     @property
     def model(self) -> str:
@@ -39,6 +42,8 @@ class GeminiProvider:
     ) -> dict[str, Any] | None:
         """Request JSON constrained by a schema and parse the returned object."""
         try:
+            self.calls += 1
+            LOGGER.info("Gemini requested: model=%s call=%d", self.model, self.calls)
             response = self._client.models.generate_content(
                 model=self._model,
                 contents=prompt,
@@ -49,10 +54,20 @@ class GeminiProvider:
                 },
             )
             data = json.loads(response.text)
+            self.last_error = None
         except Exception as error:
+            self.failures += 1
+            # Error class and HTTP code only; SDK messages can include sensitive data.
+            code = getattr(error, "code", None)
+            self.last_error = f"{type(error).__name__}" + (f" (HTTP {code})" if isinstance(code, int) else "")
             LOGGER.warning(
-                "Gemini request could not be completed: %s",
-                type(error).__name__,
+                "Gemini request could not be completed: %s; speaker remains Unknown",
+                self.last_error,
             )
             return None
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            self.failures += 1
+            self.last_error = "NonObjectJSON"
+            LOGGER.warning("Gemini response rejected: expected JSON object; speaker remains Unknown")
+            return None
+        return data

@@ -9,6 +9,7 @@ tmp/
 
 # Virtual environments
 .venv/
+.venv-reference/
 venv/
 env/
 

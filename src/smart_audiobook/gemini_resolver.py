@@ -1,6 +1,7 @@
 """Gemini wiring and compatibility facade for speaker resolution."""
 
 import os
+import logging
 from typing import Any
 
 from smart_audiobook.gemini_provider import (
@@ -35,10 +36,13 @@ def build_gemini_resolver_from_environment() -> LLMResolver | None:
 
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
+        logging.getLogger(__name__).info("Gemini disabled: GEMINI_API_KEY missing; ambiguous segments remain Unknown")
         return None
 
     try:
-        provider = GeminiProvider(api_key=api_key)
-    except (ImportError, ValueError):
+        options = {"model": os.environ["GEMINI_MODEL"]} if os.getenv("GEMINI_MODEL") else {}
+        provider = GeminiProvider(api_key=api_key, **options)
+    except (ImportError, ValueError) as error:
+        logging.getLogger(__name__).warning("Gemini initialization failed: %s; ambiguous segments remain Unknown", type(error).__name__)
         return None
     return LLMResolver(provider)

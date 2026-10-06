@@ -66,6 +66,8 @@ def detect_chapters(document: Document) -> Document:
 def is_chapter_heading(text: str) -> bool:
     """Return whether a line matches one of the supported chapter patterns."""
     candidate = " ".join(text.strip().split())
+    if re.search(r"\.{3,}\s*\d*\s*$", candidate):
+        return False  # Contents entries are not chapter starts.
     candidate = re.sub(r"^#{1,6}\s*", "", candidate).strip()
     if candidate.startswith("[") and candidate.endswith("]"):
         candidate = candidate[1:-1].strip()

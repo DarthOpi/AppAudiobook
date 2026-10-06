@@ -20,6 +20,7 @@ from smart_audiobook.characters import normalize_character_name
 from smart_audiobook.character_config import CharacterConfig
 from smart_audiobook.models import ChapterStatus
 from smart_audiobook.book_manifest import book_statistics
+from smart_audiobook.book_processor import character_metrics, analysis_warnings
 from smart_audiobook.document_loaders import DocumentLoadError
 from smart_audiobook.review_service import ReviewService
 from smart_audiobook.review_store import (
@@ -639,6 +640,8 @@ def _review_response(
         context={
             "project": project,
             "profiles": project.analysis.registry.profiles,
+            "analysis_metrics": character_metrics(project.analysis),
+            "analysis_warnings": analysis_warnings(project.analysis),
             "duplicates": duplicates,
             "issue_filter": issue,
             "dialogues": visible_dialogues,

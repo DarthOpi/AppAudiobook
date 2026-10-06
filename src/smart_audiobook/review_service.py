@@ -96,7 +96,15 @@ class ReviewService:
             raise
 
     def load(self, processing_id: str) -> ReviewProject:
-        return self.store.load(processing_id)
+        project = self.store.load(processing_id)
+        # New local profiles must be selectable in already imported projects.
+        # Assignments (especially manual ones) are not rewritten on catalog refresh.
+        try:
+            project.voices = tuple(self.tts_provider.list_voices())
+        except SpeechGenerationError:
+            LOGGER.warning("Current voice catalog unavailable; audio generation requires a valid engine.")
+            project.voices = ()
+        return project
 
     def _editable_project(self, processing_id: str) -> ReviewProject:
         project = self.load(processing_id)
@@ -122,6 +130,8 @@ class ReviewService:
             requested = updates.get(segment.id)
             if requested is None:
                 continue
+            if requested.strip().casefold() == NARRATOR.casefold():
+                raise ReviewStateError("Narrator solo puede asignarse a narración, no a diálogos o pensamientos.")
             canonical = _canonical_name(requested, known)
             profile = project.analysis.registry.find(canonical)
             if profile:
@@ -246,6 +256,9 @@ class ReviewService:
         project.analysis = replace(project.analysis, chapters=chapters, registry=registry,
             characters=registry.characters, resolution_cache=service.resolution_cache,
             llm_calls_saved=project.analysis.llm_calls_saved + service.llm_calls_saved - saved_before)
+        project.analysis = replace(project.analysis, resolution_diagnostics={
+            key: project.analysis.resolution_diagnostics.get(key, 0) + value
+            for key, value in service.diagnostics.items()})
         _complete_voice_assignments(project)
         project.output = None
         self.store.save(project)
@@ -334,7 +347,7 @@ class ReviewService:
             if project.imported:
                 from smart_audiobook.tts_config import TTSConfig
                 config = TTSConfig.from_environment(provider_override=(provider_id(self.tts_provider)
-                    if provider_id(self.tts_provider) in {"piper", "system"} else None))
+                    if provider_id(self.tts_provider) in {"piper", "system", "chatterbox"} else None))
                 # Chapter WAVs stay independent; composition inserts chapter pauses once.
                 kwargs["tts_config"] = replace(config, chapter_pause_ms=0)
                 kwargs["chapter_cache_directories"] = {ch.number: directory / "cache" / "chapters" / ch.id

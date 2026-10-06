@@ -56,6 +56,7 @@ class BookAnalysis:
     registry: CharacterRegistry = field(default_factory=CharacterRegistry)
     resolution_cache: dict[str, dict | None] = field(default_factory=dict)
     llm_calls_saved: int = 0
+    resolution_diagnostics: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in self.characters:
@@ -96,7 +97,8 @@ def analyze_book(
             AnalyzedChapter(chapter.number, chapter.title, analysis.segments)
         )
     return BookAnalysis(document, tuple(analyzed_chapters), registry.characters,
-                        registry, speaker_service.resolution_cache, speaker_service.llm_calls_saved)
+                        registry, speaker_service.resolution_cache, speaker_service.llm_calls_saved,
+                        dict(speaker_service.diagnostics))
 
 
 def generate_book(
@@ -301,6 +303,7 @@ def generate_book(
             "detected_characters": list(analysis.characters),
             "voice_assignments": dict(voices_by_speaker),
             "character_intelligence": character_metrics(analysis),
+            "analysis_warnings": list(analysis_warnings(analysis)),
             "character_profiles": analysis.registry.to_list(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source": analysis.document.source_path.name,
@@ -332,9 +335,18 @@ def generate_book(
 
 def character_metrics(analysis: BookAnalysis) -> dict[str, int]:
     threshold = CharacterConfig.from_environment().accept_confidence
-    dialogues = [s for ch in analysis.chapters for s in ch.segments if s.type == "dialogue"]
+    segments = [s for ch in analysis.chapters for s in ch.segments]
+    spoken = [s for s in segments if s.type == "dialogue"]
+    dialogues = [s for s in segments if s.type in {"dialogue", "internal_thought"}]
     profiles = [p for p in analysis.registry.profiles if p.canonical_name != "Narrator"]
     return {
+        "narration_segments": sum(s.type == "narration" for s in segments),
+        "dialogue_segments": len(spoken),
+        "internal_thought_segments": sum(s.type == "internal_thought" for s in segments),
+        "resolved_dialogues": sum(s.speaker not in {"Unknown", "Narrator"} for s in spoken),
+        "unresolved_dialogues": sum(s.speaker in {"Unknown", "Narrator"} for s in spoken),
+        "characters_detected": sum(not p.pending for p in profiles),
+        **analysis.resolution_diagnostics,
         "speakers_resolved_by_rules": sum(s.resolution_method in {"rule", "conversation", "candidate"} for s in dialogues),
         "speakers_resolved_by_llm": sum(s.resolution_method == "llm" and s.speaker != "Unknown" for s in dialogues),
         "speakers_resolved_manually": sum(s.resolution_method == "manual" for s in dialogues),
@@ -346,6 +358,16 @@ def character_metrics(analysis: BookAnalysis) -> dict[str, int]:
         "minor_characters": sum(p.importance == "minor" for p in profiles),
         "llm_calls_saved": analysis.llm_calls_saved,
     }
+
+
+def analysis_warnings(analysis: BookAnalysis) -> tuple[str, ...]:
+    metrics = character_metrics(analysis)
+    warnings = []
+    if metrics["dialogue_segments"] and not metrics["characters_detected"]:
+        warnings.append("Dialogue was detected but no character speakers were resolved. Check speaker detection configuration.")
+    if metrics.get("llm_errors", 0):
+        warnings.append("Gemini/LLM failed during analysis. Unresolved segments remain Unknown; check the safe server logs and configuration.")
+    return tuple(warnings)
 
 
 def request_cancellation(state_path: Path) -> None:

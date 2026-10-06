@@ -43,8 +43,9 @@ def assign_profile_voices(registry: CharacterRegistry, voices: Sequence[VoiceInf
                 reserved.add(p.voice_id)
             continue
         compatible = [v for v in voices if p.gender and v.gender and v.gender.casefold() == p.gender.casefold()]
-        candidates = compatible or list(voices)
         dedicated = p.canonical_name == NARRATOR or p.importance in {"major", "supporting"}
+        preferred = [v for v in voices if v.strategy == ("dedicated" if dedicated else "generic_pool")]
+        candidates = compatible or preferred or list(voices)
         unused = [v for v in candidates if v.id not in reserved]
         if dedicated and unused:
             chosen = unused[0]

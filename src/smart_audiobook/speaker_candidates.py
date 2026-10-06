@@ -39,6 +39,8 @@ def candidate_resolution(context: SpeakerContext, registry: CharacterRegistry) -
 
 def conversation_resolution(context: SpeakerContext) -> SpeakerResolution | None:
     """A-B-A + a short reply is evidence for B only in a two-person exchange."""
+    if context.dialogue.type != "dialogue":
+        return None
     speakers = context.previous_speakers[-3:]
     if len(speakers) != 3 or speakers[0] != speakers[2] or speakers[0] == speakers[1]:
         return None

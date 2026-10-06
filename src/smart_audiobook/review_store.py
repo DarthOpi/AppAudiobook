@@ -49,7 +49,7 @@ class ReviewProject:
 
     @property
     def dialogues(self) -> tuple[TextSegment, ...]:
-        return tuple(segment for segment in self.segments if segment.type == "dialogue")
+        return tuple(segment for segment in self.segments if segment.type in {"dialogue", "internal_thought"})
 
     @property
     def unresolved_count(self) -> int:
@@ -208,6 +208,7 @@ def _project_to_dict(project: ReviewProject, directory: Path) -> dict[str, Any]:
         "character_profiles": project.analysis.registry.to_list(),
         "resolution_cache": project.analysis.resolution_cache,
         "llm_calls_saved": project.analysis.llm_calls_saved,
+        "resolution_diagnostics": project.analysis.resolution_diagnostics,
         "processing_id": project.processing_id,
         "source_name": project.source_name,
         "document": {
@@ -304,6 +305,7 @@ def _project_from_dict(payload: dict[str, Any], directory: Path) -> ReviewProjec
         registry=CharacterRegistry.from_list(payload.get("character_profiles", [])),
         resolution_cache=payload.get("resolution_cache", {}),
         llm_calls_saved=int(payload.get("llm_calls_saved", 0)),
+        resolution_diagnostics=payload.get("resolution_diagnostics", {}),
     )
     if "character_profiles" not in payload:
         analysis.registry.rebuild_statistics(s for ch in chapters for s in ch.segments)
@@ -380,6 +382,8 @@ def _segment_from_dict(data: dict[str, Any]) -> TextSegment:
         new_character_candidate=data.get("new_character_candidate"),
         emphasis=tuple(data.get("emphasis", ())),
         scene_break_before=bool(data.get("scene_break_before", False)),
+        context_before=str(data.get("context_before", "")),
+        context_after=str(data.get("context_after", "")),
     )
 
 

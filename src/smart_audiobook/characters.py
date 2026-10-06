@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+import logging
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Iterable
@@ -106,6 +107,7 @@ class CharacterRegistry:
         )
         self._next_id += 1
         self.profiles.append(profile)
+        logging.getLogger(__name__).debug("CharacterRegistry added: id=%s name=%s chapter=%d pending=%s", profile.id, name, chapter, pending)
         return name
 
     @property
@@ -186,8 +188,9 @@ class CharacterRegistry:
         speaker = self.find(segment.speaker, chapter)
         for profile in self.profiles:
             dialogue = segment.type == "dialogue" and profile is speaker
+            thought = segment.type == "internal_thought" and profile is speaker
             mentions = mentioned.count(profile.canonical_name)
-            if not dialogue and not mentions:
+            if not dialogue and not thought and not mentions:
                 continue
             profile.dialogue_count += int(dialogue)
             profile.mention_count += mentions

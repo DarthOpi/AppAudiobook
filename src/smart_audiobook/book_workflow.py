@@ -98,6 +98,7 @@ class BookWorkflow:
         service = speaker_service or factory(use_llm)
         saved_before = service.llm_calls_saved
         initial_saved = project.analysis.llm_calls_saved
+        initial_diagnostics = dict(project.analysis.resolution_diagnostics)
         service.resolution_cache.update(project.analysis.resolution_cache)
         chapters = list(project.analysis.document.chapters)
         for index, source in enumerate(chapters):
@@ -134,11 +135,18 @@ class BookWorkflow:
             except Exception:
                 chapters[index] = replace(source, status=ChapterStatus.FAILED)
                 self._finish(project, chapters, previous, registry, service, saved_before, initial_saved)
+                self._diagnostics(project, initial_diagnostics, service)
                 self.store.save(project)
                 raise
             self._finish(project, chapters, previous, registry, service, saved_before, initial_saved)
+            self._diagnostics(project, initial_diagnostics, service)
             self.store.save(project)
         return project
+
+    @staticmethod
+    def _diagnostics(project, initial, service):
+        project.analysis = replace(project.analysis, resolution_diagnostics={
+            key: initial.get(key, 0) + value for key, value in service.diagnostics.items()})
 
     @staticmethod
     def _finish(project, chapters, previous, registry, service, saved_before, initial_saved):

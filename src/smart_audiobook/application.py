@@ -115,7 +115,7 @@ class AudiobookApplicationService:
         LOGGER.info("Audio generation started: %s", analysis.document.title)
         if "tts_config" not in generation_options:
             selected = getattr(tts_provider, "provider_id", None)
-            override = selected if selected in {"piper", "system"} else None
+            override = selected if selected in {"piper", "system", "chatterbox"} else None
             generation_options["tts_config"] = TTSConfig.from_environment(
                 provider_override=override
             )

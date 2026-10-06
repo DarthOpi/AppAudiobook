@@ -11,6 +11,7 @@ from zipfile import BadZipFile
 from smart_audiobook.chapter_detection import detect_chapters
 from smart_audiobook.models import Document, DocumentBlock, DocumentFormat
 from smart_audiobook.text_normalizer import normalize_text
+from smart_audiobook.pdf_reconstruction import PdfTextReconstructor
 
 
 class DocumentLoadError(ValueError):
@@ -177,7 +178,7 @@ def _build_document(
     if source_pages is not None:
         blocks = tuple(DocumentBlock(text=normalize_text(line), source_reference=f"pdf:page-{number}")
             for number, page in enumerate(_pdf_page_texts(source_pages), start=1)
-            for line in page.splitlines() if normalize_text(line))
+            for line in page.split("\n\n") if normalize_text(line))
     document = detect_chapters(
         Document(
             title=normalize_text(title) or path.stem,
@@ -229,13 +230,13 @@ def _clean_pdf_pages(pages: list[str]) -> str:
 
 def _pdf_page_texts(pages: list[str]) -> list[str]:
     page_lines = [
-        [line.strip() for line in page.splitlines() if line.strip()]
+        page.splitlines()
         for page in pages
     ]
     boundary_lines = [
         line
         for lines in page_lines
-        for line in (lines[:1] + lines[-1:])
+        for line in ([s.strip() for s in lines if s.strip()][:1] + [s.strip() for s in lines if s.strip()][-1:])
         if line
     ]
     counts = Counter(boundary_lines)
@@ -245,9 +246,10 @@ def _pdf_page_texts(pages: list[str]) -> list[str]:
     }
     cleaned_pages: list[str] = []
     for lines in page_lines:
+        nonempty = [i for i, line in enumerate(lines) if line.strip()]
+        edges = {nonempty[0], nonempty[-1]} if nonempty else set()
         useful_lines = [line for index, line in enumerate(lines)
-            if not (index in {0, len(lines)-1} and (line in repeated
-                or re.fullmatch(r"(?:p[aá]gina\s+)?\d+", line, re.I)))]
-        cleaned_pages.append("\n".join(useful_lines))
-    return [normalize_text(re.sub(r"(?<=[a-záéíóúüñ])-\n(?=[a-záéíóúüñ])", "", page,
-            flags=re.IGNORECASE)) for page in cleaned_pages]
+            if not (index in edges and (line.strip() in repeated
+                or re.fullmatch(r"(?:p[aá]gina\s+)?\d+", line.strip(), re.I)))]
+        cleaned_pages.append(normalize_text(PdfTextReconstructor().reconstruct("\n".join(useful_lines))))
+    return cleaned_pages
