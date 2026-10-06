@@ -16,6 +16,7 @@ from smart_audiobook.gemini_resolver import build_gemini_resolver_from_environme
 from smart_audiobook.speaker_identification import SpeakerIdentificationService
 from smart_audiobook.speaker_resolvers import RuleBasedSpeakerResolver
 from smart_audiobook.tts_config import TTSConfig, build_tts_provider
+from smart_audiobook.character_config import CharacterConfig
 from smart_audiobook.tts_providers import TTSProvider
 
 LOGGER = logging.getLogger(__name__)
@@ -125,10 +126,14 @@ class AudiobookApplicationService:
 
 
 def _build_speaker_service(use_llm: bool) -> SpeakerIdentificationService:
+    config = CharacterConfig.from_environment()
     llm_resolver = (
         build_gemini_resolver_from_environment() if use_llm else None
     )
+    if llm_resolver is not None:
+        llm_resolver.prompt_version = config.prompt_version
     return SpeakerIdentificationService(
         rule_resolver=RuleBasedSpeakerResolver(),
         llm_resolver=llm_resolver,
+        config=config,
     )

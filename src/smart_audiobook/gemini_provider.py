@@ -27,6 +27,11 @@ class GeminiProvider:
         self._client = client
         self._model = model
 
+    @property
+    def model(self) -> str:
+        """Expose model identity for provider-neutral cache invalidation."""
+        return self._model
+
     def generate_structured(
         self,
         prompt: str,

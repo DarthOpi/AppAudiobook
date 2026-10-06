@@ -21,9 +21,12 @@ _SPEECH_VERBS = (
     "murmuró",
 )
 _NAME_TOKEN = r"[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]*"
-_NAME_PATTERN = rf"{_NAME_TOKEN}(?:\s+{_NAME_TOKEN})*"
+_NAME_PATTERN = rf"{_NAME_TOKEN}(?:\s+(?:(?:from|of|de|del|la)\s+)?{_NAME_TOKEN})*"
 _ATTRIBUTION_PATTERN = re.compile(
     rf"\b(?i:{'|'.join(_SPEECH_VERBS)})\s+(?P<speaker>{_NAME_PATTERN})"
+)
+_BEFORE_ATTRIBUTION_PATTERN = re.compile(
+    rf"(?P<speaker>{_NAME_PATTERN})\s+(?i:{'|'.join(_SPEECH_VERBS)})\s*:\s*$"
 )
 
 
@@ -39,14 +42,11 @@ class RuleBasedSpeakerResolver:
 
     def resolve(self, context: SpeakerContext) -> SpeakerResolution | None:
         """Look for a speech verb followed by a proper name after the dialogue."""
-        if not context.after:
-            return None
-
-        attribution = context.after[0]
-        if attribution.type != "narration":
-            return None
-
-        match = _ATTRIBUTION_PATTERN.search(attribution.text)
+        match = None
+        if context.after and context.after[0].type == "narration":
+            match = _ATTRIBUTION_PATTERN.search(context.after[0].text)
+        if match is None and context.before and context.before[-1].type == "narration":
+            match = _BEFORE_ATTRIBUTION_PATTERN.search(context.before[-1].text)
         if match is None:
             return None
 
@@ -55,5 +55,4 @@ class RuleBasedSpeakerResolver:
             confidence=0.99,
             source="rule",
         )
-
 
