@@ -14,6 +14,7 @@ from smart_audiobook.book_processor import (
     BookOutput,
 )
 from smart_audiobook.models import Document, DocumentFormat, TextSegment
+from smart_audiobook.characters import CharacterRegistry
 from smart_audiobook.tts_providers import VoiceInfo
 
 PROCESSING_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -82,6 +83,11 @@ class ReviewProjectStore:
         directory = self.directory(project.processing_id)
         if not directory.is_dir():
             raise ReviewStateError("El análisis solicitado no existe.")
+        for name, voice_id in project.voice_assignments.items():
+            profile = project.analysis.registry.find(name)
+            if profile:
+                profile.voice_id = voice_id
+        project.analysis.registry.rebuild_statistics(project.segments)
         payload = _project_to_dict(project, directory)
         target = directory / "analysis.json"
         temporary = directory / "analysis.json.tmp"
@@ -114,6 +120,10 @@ def _project_to_dict(project: ReviewProject, directory: Path) -> dict[str, Any]:
     document = project.analysis.document
     payload: dict[str, Any] = {
         "version": 1,
+        "schema_version": 2,
+        "character_profiles": project.analysis.registry.to_list(),
+        "resolution_cache": project.analysis.resolution_cache,
+        "llm_calls_saved": project.analysis.llm_calls_saved,
         "processing_id": project.processing_id,
         "source_name": project.source_name,
         "document": {
@@ -168,6 +178,8 @@ def _project_to_dict(project: ReviewProject, directory: Path) -> dict[str, Any]:
 
 
 def _project_from_dict(payload: dict[str, Any], directory: Path) -> ReviewProject:
+    if int(payload.get("schema_version", 1)) > 2:
+        raise ReviewStateError("Versión de proyecto no compatible.")
     processing_id = str(payload["processing_id"])
     ReviewProjectStore._validate_id(processing_id)
     source_name = str(payload["source_name"])
@@ -191,7 +203,17 @@ def _project_from_dict(payload: dict[str, Any], directory: Path) -> ReviewProjec
         document=document,
         chapters=chapters,
         characters=tuple(str(value) for value in payload["characters"]),
+        registry=CharacterRegistry.from_list(payload.get("character_profiles", [])),
+        resolution_cache=payload.get("resolution_cache", {}),
+        llm_calls_saved=int(payload.get("llm_calls_saved", 0)),
     )
+    if "character_profiles" not in payload:
+        analysis.registry.rebuild_statistics(s for ch in chapters for s in ch.segments)
+        # Older assignments lack provenance: preserve them as manual conservatively.
+        for name, voice_id in payload.get("voice_assignments", {}).items():
+            profile = analysis.registry.find(name)
+            if profile:
+                profile.voice_id, profile.voice_manual = str(voice_id), True
     voices = tuple(
         VoiceInfo(
             id=str(voice["id"]),
@@ -254,6 +276,10 @@ def _segment_from_dict(data: dict[str, Any]) -> TextSegment:
             float(data["confidence"]) if data.get("confidence") is not None else None
         ),
         resolution_method=data.get("resolution_method"),
+        review_needed=bool(data.get("review_needed", data["speaker"] == "Unknown" or (
+            data.get("confidence") is not None and float(data["confidence"]) < 0.85
+        ))),
+        new_character_candidate=data.get("new_character_candidate"),
     )
 
 

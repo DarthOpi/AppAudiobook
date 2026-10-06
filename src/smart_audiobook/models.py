@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 SegmentType = Literal["narration", "dialogue"]
-ResolutionSource = Literal["rule", "llm", "manual", "system", "unknown"]
+ResolutionSource = Literal["rule", "conversation", "candidate", "llm", "manual", "system", "unknown"]
 DocumentFormat = Literal["txt", "pdf", "docx"]
 
 NARRATOR = "Narrator"
@@ -53,6 +53,8 @@ class TextSegment:
     order: int = 0
     confidence: float | None = None
     resolution_method: ResolutionSource | None = None
+    review_needed: bool = False
+    new_character_candidate: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation of the segment."""
@@ -65,6 +67,8 @@ class TextSegment:
             "speaker": self.speaker,
             "confidence": self.confidence,
             "resolution_method": self.resolution_method,
+            "review_needed": self.review_needed,
+            "new_character_candidate": self.new_character_candidate,
         }
 
 
@@ -75,6 +79,7 @@ class SpeakerResolution:
     speaker: str
     confidence: float
     source: ResolutionSource
+    is_new_character: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +90,11 @@ class SpeakerContext:
     before: tuple[TextSegment, ...]
     after: tuple[TextSegment, ...]
     known_characters: tuple[str, ...]
+    candidate_speakers: tuple[str, ...] = ()
+    active_characters: tuple[str, ...] = ()
+    previous_speakers: tuple[str, ...] = ()
+    chapter: int = 0
+    candidate_aliases: tuple[tuple[str, str, int], ...] = ()
 
     def cache_key(self) -> tuple[object, ...]:
         """Return a stable key for identical LLM requests in one execution."""
@@ -99,6 +109,11 @@ class SpeakerContext:
                 for segment in self.after
             ),
             self.known_characters,
+            self.candidate_speakers,
+            self.active_characters,
+            self.previous_speakers,
+            self.chapter,
+            self.candidate_aliases,
         )
 
 
